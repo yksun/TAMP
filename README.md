@@ -1,4 +1,4 @@
-# 🧬 TAMP: Telomere Assembly Merge Pipeline (`merge_assembly_V-pre-0.1.sh`)
+# 🧬 TAMP: Telomere Assembly Merge Pipeline (`TAMP-pre-0.1.sh`)
 
 **TAMP (Telomere Assembly Merge Pipeline)** is a modular, automated pipeline for benchmarking and merging genome assemblies.  
 It was tested and optimized for **fungal haploid genomes**, but can be easily adapted for any **PacBio HiFi dataset**.  
