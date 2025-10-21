@@ -148,7 +148,6 @@ If you use **TAMP** in your research, please cite this repository and the underl
 
 ```
 ├── TAMP.sh                       # Main pipeline script
-├── busco.sh                      # Original BUSCO helper script
 ├── assembly_info.csv             # Auto-generated run summary
 ├── assembly_info.md              # Markdown summary for GitHub
 ├── quast_results/                # QUAST outputs
