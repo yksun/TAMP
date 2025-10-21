@@ -1,4 +1,4 @@
-# 🧬 TAMP: Telomere Assembly Merge Pipeline (`TAMP-pre-0.1.sh`)
+# 🧬 TAMP: Telomere Assembly Merge Pipeline (`TAMP_pre-0.1.sh`)
 
 **TAMP (Telomere Assembly Merge Pipeline)** is a modular, automated pipeline for benchmarking and merging genome assemblies.  
 It was tested and optimized for **fungal haploid genomes**, but can be easily adapted for any **PacBio HiFi dataset**.  
@@ -51,7 +51,7 @@ Each assembler should also be installed and callable:
 ## 🚀 Usage
 
 ```bash
-bash merge_assembly_V-pre-0.1.sh   -g 2g   -t 32   --fastq reads.fastq   --fasta preassembly.fa   -m AACCCT   --busco ascomycota_odb10   --choose
+bash TAMP.sh   -g 2g   -t 32   --fastq reads.fastq   --fasta preassembly.fa   -m AACCCT   --busco ascomycota_odb10   --choose
 ```
 
 ### Arguments
@@ -122,17 +122,17 @@ Before final merging, the script prints a formatted table and exports `assembly_
 
 ### Evaluate pre-assembled FASTA only
 ```bash
-./merge_assembly_V-pre-0.1.sh -g 2g -t 32 --fasta genome.fa -m AACCCT --busco ascomycota_odb10 -s 7-13
+./TAMP.sh -g 2g -t 32 --fasta genome.fa -m AACCCT --busco ascomycota_odb10 -s 7-13
 ```
 
 ### Run full benchmarking and select best assembly
 ```bash
-./merge_assembly_V-pre-0.1.sh -g 2g -t 32 --fastq reads.fastq -m AACCCT --busco fungi_odb10 --choose
+./TAMP.sh -g 2g -t 32 --fastq reads.fastq -m AACCCT --busco fungi_odb10 --choose
 ```
 
 ### Resume evaluation from step 7
 ```bash
-./merge_assembly_V-pre-0.1.sh -g 2g -t 32 -m AACCCT --fasta existing.fa -s 7-10 --busco ascomycota_odb10
+./TAMP.sh -g 2g -t 32 -m AACCCT --fasta existing.fa -s 7-10 --busco ascomycota_odb10
 ```
 
 ---
@@ -147,7 +147,7 @@ If you use **TAMP** in your research, please cite this repository and the underl
 ## 📁 Repository Layout
 
 ```
-├── merge_assembly_V-pre-0.1.sh   # Main pipeline script
+├── TAMP.sh                       # Main pipeline script
 ├── busco.sh                      # Original BUSCO helper script
 ├── assembly_info.csv             # Auto-generated run summary
 ├── assembly_info.md              # Markdown summary for GitHub
