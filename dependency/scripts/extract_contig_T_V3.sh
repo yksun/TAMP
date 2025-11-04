@@ -1,80 +1,96 @@
 #!/bin/bash
-# extract_contig_t2t_V3
-# Extract contigs that have telomere at BOTH ends from a FASTA,
-# using a seqtk 'telo' result file (columns: contig start end length ...)
-
 set -euo pipefail
 
-# Defaults
-output="output.fasta"
-fasta_file=""
-seqtk_file=""
-
 usage() {
-  echo "Usage: $0 -f <fasta_file> -i <seqtk_telo_result> [-o <output_fasta>]"
+  echo "Usage: $0 -f <input_fasta> -i <input_txt> -o <output_fasta>"
   echo "  -f  Input FASTA file"
-  echo "  -i  seqtk telo result file (expects columns: contig start end length ...)"
-  echo "  -o  Output FASTA file (default: output.fasta)"
+  echo "  -i  Input text file with contig details (e.g., from 'seqtk telo')"
+  echo "  -o  Output FASTA file with extracted contigs"
   exit 1
 }
 
-# Parse args
-while getopts "f:i:o:" opt; do
-  case "$opt" in
-    f) fasta_file="$OPTARG" ;;
-    i) seqtk_file="$OPTARG" ;;
-    o) output="$OPTARG" ;;
-    *) usage ;;
-  endsw
+fasta=""
+input_txt=""
+output_fasta=""
+
+while getopts ":f:i:o:" opt; do
+  case ${opt} in
+    f ) fasta=$OPTARG ;;
+    i ) input_txt=$OPTARG ;;
+    o ) output_fasta=$OPTARG ;;
+    * ) usage ;;
+  esac
 done
 
-# Checks
-[[ -z "${fasta_file}" || -z "${seqtk_file}" ]] && usage
-[[ -s "${fasta_file}" ]] || { echo "[error] FASTA not found or empty: ${fasta_file}" >&2; exit 1; }
-[[ -s "${seqtk_file}" ]] || { echo "[error] seqtk telo result not found or empty: ${seqtk_file}" >&2; exit 1; }
-command -v seqtk >/dev/null 2>&1 || { echo "[error] seqtk not found in PATH" >&2; exit 1; }
+[[ -z "${fasta}" || -z "${input_txt}" || -z "${output_fasta}" ]] && usage
 
-# Prepare
-: > "${output}"
-ids="$(mktemp "${TMPDIR:-/tmp}/t2t_ids.XXXXXX")"
-trap 'rm -f "${ids}"' EXIT
+if [[ ! -s "${fasta}" ]]; then
+  echo "[error] FASTA not found or empty: ${fasta}" >&2
+  exit 1
+fi
+if [[ ! -s "${input_txt}" ]]; then
+  echo "[error] Input list not found or empty: ${input_txt}" >&2
+  exit 1
+fi
+if ! command -v seqtk >/dev/null 2>&1; then
+  echo "[error] seqtk not found in PATH" >&2
+  exit 1
+fi
 
-# Build ID list of contigs that have BOTH: (at least one start==0) AND (at least one end==length)
-# We normalize to the FIRST TOKEN of the contig header (before any whitespace),
-# so it matches seqtk's header-ID handling even if FASTA headers have descriptions.
+# Create a temp file for IDs
+ids_file="$(mktemp "${TMPDIR:-/tmp}/telo_ids.XXXXXX")"
+trap 'rm -f "${ids_file}"' EXIT
+
+# The input is typically: contig start end motif strand ...
+# Some pipelines want only contigs where telomere is at the very start or very end.
+# We'll detect if columns 2,3,4 are numeric; if yes, apply (start==0 || end==length) filter.
+# Otherwise, just use column 1.
 awk '
+  BEGIN { OFS="\n" }
   {
-    gsub(/\r$/, "", $0);               # strip CR if present
-    if (NF < 4) next;                  # need contig, start, end, length
-    if ($2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/) next;
+    # Normalize DOS newlines and collapse multiple spaces/tabs
+    gsub(/\r$/, "", $0)
+    # Require at least one field
+    if (NF < 1) next
 
-    contig=$1; sub(/[ \t].*$/, "", contig);
-    start=$2+0; end=$3+0; len=$4+0;
+    # Check if we can interpret start/end/length as integers (columns 2,3,4)
+    has_numeric = (NF >= 4 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/)
 
-    if (start==0) has_start[contig]=1;
-    if (end==len) has_end[contig]=1;
+    contig = $1
+    # Trim contig to the first token (up to whitespace)
+    sub(/[ \t].*$/, "", contig)
+
+    if (has_numeric) {
+      start=$2; end=$3; len=$4
+      if (start == 0 || end == len) {
+        print contig
+      }
+    } else {
+      print contig
+    }
   }
-  END {
-    for (c in has_start) if (c in has_end) print c;
-  }
-' "${seqtk_file}" | sort -u > "${ids}"
+' "${input_txt}" \
+| awk 'length>0' \
+| sort -u > "${ids_file}"
 
-if [[ ! -s "${ids}" ]]; then
-  echo "[warn] No contigs have telomeres at BOTH ends; ${output} will be empty."
+if [[ ! -s "${ids_file}" ]]; then
+  echo "[warn] No contig IDs found to extract (check ${input_txt})" >&2
+  # Create an empty output to be explicit
+  : > "${output_fasta}"
   exit 0
 fi
 
-echo "Extracting sequences for $(wc -l < "${ids}") contig(s) with telomeres at BOTH ends..."
-seqtk subseq "${fasta_file}" "${ids}" > "${output}" || {
+echo "Extracting sequences..."
+# seqtk matches the first token of the header (before any whitespace), which is what we prepared.
+seqtk subseq "${fasta}" "${ids_file}" > "${output_fasta}" || {
   echo "[error] seqtk subseq failed" >&2
   exit 1
 }
 
-if [[ ! -s "${output}" ]]; then
-  echo "[warn] Output FASTA is empty. Possible header/ID mismatch."
-  echo "  Checks:"
-  echo "    head -n1 ${fasta_file} | sed 's/^>//; s/ .*//'"
-  echo "    head -n1 ${ids}"
+if [[ ! -s "${output_fasta}" ]]; then
+  echo "[warn] Output FASTA is empty. Possible header/ID mismatch between ${fasta} and ${input_txt}." >&2
+  echo "       Inspect a header:   head -n1 ${fasta} | sed 's/^>//; s/ .*//'"
+  echo "       Inspect an ID line: head -n1 ${ids_file}"
 else
-  echo "Extraction complete. Output written to ${output}"
+  echo "Sequences written to ${output_fasta}"
 fi
