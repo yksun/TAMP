@@ -1,163 +1,152 @@
-# 🧬 TAMP: Telomere Assembly Merge Pipeline (`TAMP_pre-0.1.sh`)
+# 🧬 TAMP: Telomere Assembly Merge Pipeline (v0.1)
 
-**TAMP (Telomere Assembly Merge Pipeline)** is a modular, automated pipeline for benchmarking and merging genome assemblies.  
-It was tested and optimized for **fungal haploid genomes**, but can be easily adapted for any **PacBio HiFi dataset**.  
-TAMP serves as both a **benchmarking framework**—automatically evaluating multiple assemblers—and a **decision-support tool** that simplifies the process of identifying the best-performing assembly for your genome.
+**TAMP** is a modular pipeline for benchmarking multiple assemblies, selecting a best candidate, and producing a telomere-aware final merge with unified reports.
 
----
-
-## ✨ Key Features
-
-- **Purpose-built for fungal genomes** (haploid assemblies).  
-  - Tuned parameters for high accuracy and telomere-complete assemblies.
-- **Flexible input:**  
-  - Accepts either PacBio HiFi reads (`--fastq`) or pre-assembled genomes (`--fasta`).
-- **Multi-assembler integration:**  
-  - Runs or imports assemblies from **HiCanu**, **NextDenovo**, **Peregrine**, **IPA**, **Flye**, **RAFT-hifiasm**, and user-provided assemblies.
-- **Automated evaluation & ranking:**
-  - Runs **BUSCO** for completeness (`--busco <lineage>`).  
-  - Runs **QUAST** for contiguity, accuracy, and GC metrics.  
-  - Detects **telomere-containing contigs** and counts single/double-end contigs.
-- **Unified reporting:**
-  - Aggregates all statistics in `assembly_info.csv` and a Markdown summary `assembly_info.md`.
-  - Generates human-readable pre-merge summaries (pretty-printed tables + markdown).
-- **Version tracking:**  
-  - Captures assembler versions and records them automatically.
+> This release renames the main script to **`TAMP-0.1.sh`**, adds per-step logs, tool/version capture, and a canonical final assembly path: `assemblies/final.merged.fasta`.
 
 ---
 
-## ⚙️ Installation & Requirements
+## ✨ Highlights
 
-### Dependencies
-
-You’ll need the following tools available in `$PATH` or via conda:
-
-| Tool | Purpose |
-|------|----------|
-| `bash >= 4.2` | Core shell interpreter |
-| `conda` | Environment management |
-| `seqtk` | Telomere motif scanning |
-| `busco >= 5.x` | Completeness evaluation |
-| `quast >= 5.x` | Assembly statistics |
-| `funannotate` | Sorting & cleaning assemblies |
-| `awk`, `sed`, `grep`, `column` | Core utilities |
-
-Each assembler should also be installed and callable:
-
-- `canu`, `nextDenovo`, `pg_asm` (Peregrine), `ipa`, `flye`, `hifiasm`, and optionally `RAFT`.
+- Evaluate assemblies from multiple tools (canu, nextDenovo, peregrine, ipa, flye, RAFT-hifiasm, + optional external).
+- Compute **BUSCO**, **QUAST**, and **Telomere** metrics.
+- Final merge + redundancy reduction with **canonical** output: `assemblies/final.merged.fasta`.
+- Reproducible logging/provenance: per-step logs, tool versions, and conda env tracking.
 
 ---
 
-## 🚀 Usage
+## 📦 Repository layout (key)
+
+```
+.
+├── TAMP-0.1.sh                 # main pipeline (renamed & instrumented)
+├── README.md                   # this file
+├── tamp-env.yml                # monolithic environment (optional)
+├── assemblies/                 # per-assembler inputs & outputs
+├── dependency/                 # <<< ENV YMLs and helper scripts live here
+│   ├── busco.yml
+│   ├── funannotate.yml
+│   ├── pacbiohifi.yml
+│   ├── quast.yml
+│   ├── redundans.yml
+│   ├── seqtk.yml
+│   ├── scripts/
+│   │   └── extract_contig_T_V3.sh
+│   └── ... (any other .yml / .sh you added)
+└── log/                        # logs written at runtime
+```
+
+> Put any additional environments (`*.yml`) and helper scripts (`*.sh`) under **`dependency/`** and they will be documented by this README’s guidance below.
+
+---
+
+## ⚙️ Installation
+
+### Option A — single environment
+```bash
+mamba env create -f tamp-env.yml
+mamba activate tamp
+```
+
+### Option B — per-tool environments (recommended for long-term reproducibility)
+Create only what you need; activate before the corresponding steps.
+
+| Env file | Purpose | Main tools | Create | Activate | Quick check |
+|---|---|---|---|---|---|
+| `dependency/busco.yml` | BUSCO completeness | `busco` | `mamba env create -f dependency/busco.yml -n busco` | `mamba activate busco` | `busco --version` |
+| `dependency/quast.yml` | QUAST assembly stats | `quast.py`/`quast` | `mamba env create -f dependency/quast.yml -n quast` | `mamba activate quast` | `quast.py --version || quast -v` |
+| `dependency/funannotate.yml` | Sorting final contigs; `seqtk` lives here in our setup | `funannotate`, `seqtk` | `mamba env create -f dependency/funannotate.yml -n funannotate` | `mamba activate funannotate` | `funannotate --version && seqtk 2>&1 | head -n1` |
+| `dependency/pacbiohifi.yml` | Runtime for QUAST and other HiFi tasks (if you prefer this env) | `quast`, `samtools` | `mamba env create -f dependency/pacbiohifi.yml -n pacbiohifi` | `mamba activate pacbiohifi` | `quast.py --version || quast -v` |
+| `dependency/redundans.yml` | Redundancy reduction | `redundans.py` | `mamba env create -f dependency/redundans.yml -n redundans` | `mamba activate redundans` | `redundans.py --help | head -n1` |
+| `dependency/seqtk.yml` | Minimal env for seqtk-only use | `seqtk` | `mamba env create -f dependency/seqtk.yml -n seqtk` | `mamba activate seqtk` | `seqtk 2>&1 | head -n1` |
+
+> If your `.yml` files already contain a `name:` field, the `-n <name>` flag is optional.
+
+---
+
+## 🚀 Quick start
 
 ```bash
-bash TAMP.sh   -g 2g   -t 32   --fastq reads.fastq   --fasta preassembly.fa   -m AACCCT   --busco ascomycota_odb10   --choose
+# Example: run only Step 12 (final merge & publish)
+bash TAMP-0.1.sh -g 50m -t 20 --fasta assemblies/canu.result.fasta -m AACCCT --busco ascomycota_odb10 -s 12
+
+# Full compare + choose final (interactive prompt unless you pass --choose)
+bash TAMP-0.1.sh -g 50m -t 20 --fastq reads.fastq.gz -m AACCCT --busco ascomycota_odb10
 ```
 
-### Arguments
-
-| Flag | Description |
-|------|--------------|
-| `-g` | Genome size (required). e.g. `2g`, `500m` |
-| `-t` | Threads (required). e.g. `32` |
-| `--fastq` | Path to PacBio HiFi reads (optional if `--fasta` provided) |
-| `--fasta` | Path to pre-assembled genome FASTA (optional or combined) |
-| `-m` | Telomere motif (required). e.g. `AACCCT` |
-| `-s` | Steps to run (comma/range). e.g. `1,3-5` (default: all) |
-| `--busco` | Lineage for BUSCO evaluation (default: `ascomycota_odb10`) |
-| `--choose` | Prompt to choose assembler for final merge interactively |
+### Key arguments
+- `-g <SIZE>`: genome size, e.g. `50m`, `2g`
+- `-t <INT>`: threads
+- `--fastq <reads.fastq.gz>`: PacBio HiFi reads (optional)
+- `--fasta <assembly.fa>`: external/prebuilt assembly to include
+- `-m <MOTIF>`: telomere motif (default `TTAGGG`; reverse is `AACCCT`)
+- `--busco <LINEAGE>`: BUSCO lineage (e.g. `ascomycota_odb10`)
+- `--choose [NAME]`: pick final (`canu|external|flye|ipa|nextDenovo|peregrine|RAFT-hifiasm`)
+- `-s <N>`: run **only** step N (e.g., `12..17`)
 
 ---
 
-## 🔢 Pipeline Steps Overview
+## 🔢 Steps (final stages)
 
-| Step | Description |
-|------|--------------|
-| **1–6** | Run supported assemblers (HiCanu, NextDenovo, Peregrine, IPA, Flye, RAFT-hifiasm) |
-| **7** | Copy all assemblies → logs to `assembly_info.csv`, runs BUSCO if `--busco` |
-| **8** | Detect telomere-containing contigs → counts single/double-end telomeres |
-| **9** | Merge assemblies → generates `allmerged_telo.fasta` |
-| **10** | Run QUAST → extracts all available metrics (`report.tsv` or fallback `report.txt`) |
-| **11** | Previews QUAST report + full Markdown summary before final merge |
-| **12–13** | Post-merge BUSCO & telomere cleanup |
+- **Step 12** — Final merge + redundans; writes `assemblies/final.merged.fasta`. If `--choose` is not provided, prints `assemblies/assembly_info.csv` (if present) and prompts for selection.
+- **Step 13** — BUSCO on final; writes `assemblies/final.busco.csv` (metrics-as-rows; single column `final`).
+- **Step 14** — Telomere analysis on final; writes `assemblies/final.telo.csv` plus `assemblies/final.telo.fasta`.
+- **Step 15** — QUAST on final; writes `assemblies/final.quast.csv` and `assemblies/final-quast.tsv` (from `quast_final/`).
+- **Step 16** — Merge final metrics into **`final_result.csv`** (in CWD), optionally appending to `assemblies/assembly_info.csv` columns.
+- **Step 17** — Cleanup; organizes temp artifacts into `temp/*` and logs into `log/`.
 
----
-
-## 📊 Unified Reporting System
-
-After execution, TAMP outputs the following summaries:
-
-### **assembly_info.csv**
-Comprehensive summary of all assemblies, including:
-
-```
-Name, Version, Lineage, Timestamp,
-BUSCO metrics (C, S, D, F, M),
-Telomere counts (DoubleEndTelo, SingleEndTelo),
-QUAST metrics (Total length, #contigs, N50, L50, GC%, etc.)
-```
-
-### **assembly_info.md**
-Markdown-formatted summary generated automatically — easy to view in GitHub or share with collaborators.
-
-**Pre-merge preview:**  
-Before final merging, the script prints a formatted table and exports `assembly_info.md`, allowing you to choose the best assembly visually.
+Per-step logs: `log/step_<N>_<runid>.log`. Main aggregated log: `log/TAMP_<runid>.log`.  
+Provenance: `version.log` (tool versions), `version_info.txt` (conda envs used).
 
 ---
 
-## 🧩 Outputs
+## 🧰 Helper scripts (in `dependency/scripts/`)
 
-| File | Description |
-|------|--------------|
-| `assembly_info.csv` | Incremental statistics log (updated after each step) |
-| `assembly_info.md` | Markdown version for GitHub and sharing |
-| `quast_results/` | QUAST output files |
-| `busco_*` | BUSCO result directories |
-| `t2t_clean.fasta` | Cleaned telomere-to-telomere assembly |
-| `merged_<assembler>_sort.fa` | Final merged assembly output |
+### `extract_contig_T_V3.sh`
+Extracts contigs from a FASTA by ID list (e.g., telomere-positive IDs derived from `seqtk telo`).
 
----
-
-## 🧠 Example Workflows
-
-### Evaluate pre-assembled FASTA only
+**Usage (examples):**
 ```bash
-./TAMP.sh -g 2g -t 32 --fasta genome.fa -m AACCCT --busco ascomycota_odb10 -s 7-13
+# Using telomere ID list generated in pipeline
+bash dependency/scripts/extract_contig_T_V3.sh   -i assemblies/canu.result.fasta   -l assemblies/canu.result.telo.list.ids   -o canu.telo.fasta
+
+# Generic extraction by IDs
+bash dependency/scripts/extract_contig_T_V3.sh   -i assemblies/some_assembly.fasta   -l ids.txt   -o subset.fasta
 ```
 
-### Run full benchmarking and select best assembly
-```bash
-./TAMP.sh -g 2g -t 32 --fastq reads.fastq -m AACCCT --busco fungi_odb10 --choose
-```
+**Common flags (may vary; run with -h to confirm):**
+- `-i <FASTA>`: input assembly fasta
+- `-l <LIST>`: file with one contig ID per line
+- `-o <FASTA>`: output fasta
 
-### Resume evaluation from step 7
-```bash
-./TAMP.sh -g 2g -t 32 -m AACCCT --fasta existing.fa -s 7-10 --busco ascomycota_odb10
-```
+> Add additional helper scripts here (one subsection per script). Provide 1–2 sentence intros + a minimal example invocation.
 
 ---
 
-## 🧾 Citation
+## 🧪 Reproducibility & Logging
 
-If you use **TAMP** in your research, please cite this repository and the underlying tools:
-- *HiCanu, NextDenovo, Peregrine, IPA, Flye, Hifiasm, RAFT, BUSCO, QUAST, Funannotate, Seqtk.*
-
----
-
-## 📁 Repository Layout
-
-```
-├── TAMP.sh                       # Main pipeline script
-├── assembly_info.csv             # Auto-generated run summary
-├── assembly_info.md              # Markdown summary for GitHub
-├── quast_results/                # QUAST outputs
-└── README.md                     # This documentation
-```
+- Each step writes a dedicated log with timestamps and `set -x` tracing.
+- The pipeline writes:
+  - `version.log` — bash/python/conda + tool versions (BUSCO, QUAST, seqtk, funannotate, redundans, merge_wrapper where available)
+  - `version_info.txt` — unique conda environments **actually activated** during the run + `conda info --envs`
 
 ---
 
-## 🧬 About
+## 🧯 Troubleshooting
 
-TAMP was developed for **fungal genome assembly benchmarking and telomere-to-telomere merging** workflows.  
-It is ideal for researchers seeking a reproducible and automated evaluation framework for **PacBio HiFi** datasets.
+- **QUAST not found:** activate the `quast` or `pacbiohifi` environment.
+- **seqtk not found:** activate the `funannotate` (or `seqtk`) environment.
+- **BUSCO rerun refused:** remove stale `busco/final` or run with force inside the pipeline; the pipeline already tries to reuse existing metrics when present.
+- **No `assemblies/` folder:** create it and place your `*.result.fasta` files.
 
+---
+
+## 📜 License & Citation
+
+Please cite this repository and the tools utilized (BUSCO, QUAST, Seqtk, Funannotate, MUMmer/Redundans, and the assemblers).
+
+---
+
+## 🙌 Acknowledgements
+
+Developed to streamline fungal genome assembly evaluation and telomere-to-telomere merging. Contributions & PRs welcome!
