@@ -1,5 +1,5 @@
 #!/bin/bash
-# Version: TAMP-0.1
+# Version: TAMP-0.12
 
 # Default values
 genomesize=""
