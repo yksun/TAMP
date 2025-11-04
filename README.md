@@ -6,7 +6,7 @@
 
 ## ✨ What’s new in v0.1
 - Script renamed to **`TAMP-0.1.sh`**.
-- **Per‑step logging**: each step writes timestamped stdout/stderr to `logs/step_<N>.log`.
+- **Per‑step logging**: each step writes timestamped stdout/stderr to `logs/step_<N>.log`. 
 - **Version snapshot**: a consolidated `version.log` is generated at run start (records versions of key tools found on `$PATH`).
 
 ---
@@ -28,7 +28,7 @@ TAMP/
     ├── logs/                   # Per-step logs: step_1.log, step_2.log, ...
     ├── version.log             # Software versions snapshot
     ├── quast_results/          # QUAST outputs (if enabled)
-    ├── busco_*                 # BUSCO outputs (if enabled)
+    ├── busco                   # BUSCO outputs (if enabled)
     ├── assembly_info.csv       # Aggregated metrics
     └── assembly_info.md        # Markdown summary
 ```
@@ -94,7 +94,7 @@ chmod +x TAMP-0.1.sh
 | **8** | Detect telomere‑containing contigs; count single/double‑end telomeres |
 | **9** | Merge assemblies into consensus (`allmerged_telo.fasta`) |
 | **10** | QUAST: contiguity/accuracy/GC metrics |
-| **11** | Pre‑merge preview & Markdown summary (`assembly_info.md`) |
+| **11** | Pre‑merge preview & Markdown summary (`assembly_info.csv`) |
 | **12–13** | Post‑merge BUSCO & telomere cleanup |
 
 > The helper script **`dependency/scripts/extract_contig_T_V3.sh`** is invoked by the pipeline for telomere‑related extraction tasks where required.
