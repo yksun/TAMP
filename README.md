@@ -1,6 +1,6 @@
 # 🧬 TAMP: Telomere Assembly Merge Pipeline (v0.2.1)
 
-**TAMP v0.2.1** is a maintenance update to the v0.2 release that clarifies and hardens **Step 12** so that *all contigs from `t2t_clean.fasta` are preserved*, while redundancy reduction is applied only to non‑T2T contigs. The interactive assembler selection and `--choose` flag remain supported.
+**TAMP (Telomere Assembly Merge Pipeline)** is a modular, automated pipeline for benchmarking, selecting, and merging genome assemblies—optimized for **fungal haploid genomes** and **PacBio HiFi** reads, but broadly applicable to other small eukaryotic genomes.
 
 ---
 
