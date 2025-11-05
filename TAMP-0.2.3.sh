@@ -1,4 +1,19 @@
 #!/bin/bash
+# ------------------------------------------------------------
+# v0.2.3 (2025-11-05)
+# - FIX: Step 7 'rename_and_sort_fasta': removed shell call inside Python heredoc
+#        and log Python version from bash before invoking Python (no more SyntaxError).
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# v0.2.2 (2025-11-05)
+# - FIX: Telomere double-end logic in Steps 9 & 14: now counts contigs with telomeres at both ends.
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# v0.2.1 (2025-11-05)
+# - Version bump from 0.2 → 0.2.1.
+# - Step 12 note: t2t_clean.fasta contigs are preserved; redundans runs only on non-T2T contigs.
+#   (--choose still supported; interactive prompt retained.)
+# ------------------------------------------------------------
 
 # ===== Version logging helpers =====
 VERSION_FILE="${VERSION_FILE:-version.txt}"
@@ -79,8 +94,9 @@ with open(outp, 'w') as o:
   for i, (name, seq) in enumerate(recs, start=1):
     o.write(f">{prefix}_{i}\n")
     o.write(wrap(seq) + ("\n" if seq and not seq.endswith("\n") else ""))
-log_version "python3" "python3"
+
 PY
+  log_version "python3" "python3"
   python3 "$py" "$infa" "$outfa" "$prefix"
   local rc=$?
   rm -f "$py"
@@ -119,7 +135,7 @@ prompt_from_tty() {
 }
 # ==== end helpers ====
 
-# Version: TAMP-0.2
+# Version: TAMP-0.1
 
 # Default values
 genomesize=""
@@ -715,6 +731,14 @@ log_version "seqtk" "seqtk"
 
   # 3) Compute metrics for this assembler
   double=$(awk 'NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {c=$1; sub(/[ \t].*$/,"",c); if($2==0 && $3==$4) print c}' "$list" | sort -u | wc -l)
+  # v0.2.2 override: correct double-end contig counting (both ends flagged)
+  double=$(awk '
+    NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
+      c=$1; sub(/[ \t].*$/,"",c);
+      s[c]+=($2==0)?1:0; e[c]+=($3==$4)?1:0
+    }
+    END{ for(c in s){ if(s[c]>0 && e[c]>0) print c } }
+  ' "$list" | sort -u | wc -l)
   single=$(awk '
     NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
       c=$1; sub(/[ \t].*$/,"",c);
@@ -970,174 +994,298 @@ PY
 
 echo "Done: assemblies/assembly.quast.csv"
   ;;
+      12)
+        # Step 12 - Final merge (choose assembler via --choose or prompt)
+        echo "Step 12 - Final merge"
 
-12)
-# Step 12 - Final merge (choose assembler via --choose or prompt)
-echo "Step 12 - Final merge"
+        # Parse optional --choose argument
+        # assembler default changed to empty to force prompt when --choose not given
+        assembler=""
+        CHOOSE_FLAG=0
+        while [[ $# -gt 0 ]]; do
+          case "$1" in
+            --choose)
+              CHOOSE_FLAG=1
+              if [ -n "${2:-}" ] && [ "${2#-}" != "$2" ] ; then
+                :
+              else
+                if [ -n "${2:-}" ]; then assembler="$2"; shift; fi
+              fi
+              shift
+              ;;
+            --choose=*)
+              CHOOSE_FLAG=1
+              assembler="${1#--choose=}"
+              shift
+              ;;
+            *)
+              shift
+              ;;
+          esac
+        done
 
-# Parse optional --choose argument
-# assembler default changed to empty to force prompt when --choose not given
-assembler=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --choose)
-      CHOOSE_FLAG=1
-      if [ -n "${2:-}" ] && [ "${2#-}" != "$2" ] ; then
-        # next token is another flag; stay interactive
-        :
-      else
-        if [ -n "${2:-}" ]; then assembler="$2"; shift; fi
-      fi
-      shift
-      ;;
-    *)           shift ;;
-  esac
-done
+        # If not provided, build/print assemblies/assembly_info.csv (if parts exist) and then prompt
+        if [[ -z "$assembler" ]]; then
+          if [[ ! -d assemblies ]]; then
+            echo "[error] 'assemblies' folder not found (expected to exist)." >&2
+            exit 1
+          fi
 
-# If not provided, build/print assemblies/assembly_info.csv (if parts exist) and then prompt
-if [[ -z "$assembler" ]]; then
-  if [[ ! -d assemblies ]]; then
-    echo "[error] 'assemblies' folder not found (expected to exist)." >&2
-    exit 1
-  fi
+          parts=()
+          for cand in assemblies/assembly.telo.csv assemblies/assembly.busco.csv assemblies/assembly.quast.csv assemblies/assemblies.quast.csv; do
+            [[ -s "$cand" ]] && parts+=("$cand")
+          done
 
-  # Gather any available component CSVs (order doesn’t matter; header will be normalized)
-  parts=()
-  for cand in assemblies/assembly.telo.csv assemblies/assembly.busco.csv assemblies/assembly.quast.csv assemblies/assemblies.quast.csv; do
-    [[ -s "$cand" ]] && parts+=("$cand")
-  done
+          if (( ${#parts[@]} > 0 )); then
+            info_csv="assemblies/assembly_info.csv"
+            desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,RAFT-hifiasm"
+            echo "$desired_header" > "$info_csv"
+            for f in "${parts[@]}"; do
+              awk -v TARGET="$desired_header" -F',' -v OFS=',' '
+                BEGIN{
+                  n=split(TARGET, want, ",")
+                  for(i=1;i<=n;i++){ gsub(/^ *| *$/,"", want[i]); lwant[i]=tolower(want[i]) }
+                }
+                NR==1{
+                  for(i=1;i<=NF;i++){
+                    gsub(/
+/,"",$i); h=$i; gsub(/^ *| *$/,"",h)
+                    l=tolower(h); hmap[l]=i
+                  }
+                  for(i=1;i<=n;i++){ idx[i]= (lwant[i] in hmap ? hmap[lwant[i]] : 0) }
+                  next
+                }
+                NR>1{
+                  row=""
+                  for(i=1;i<=n;i++){
+                    v=(idx[i]>0 && idx[i]<=NF)? $idx[i] : ""
+                    gsub(/
+/,"",v)
+                    row = (i==1)? v : (row OFS v)
+                  }
+                  print row
+                }' "$f" >> "$info_csv"
+            done
+          fi
 
-  # If we have any parts, (re)build assembly_info.csv by stacking rows and keeping ONE header in desired order
-  if (( ${#parts[@]} > 0 )); then
-    info_csv="assemblies/assembly_info.csv"
-    desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,RAFT-hifiasm"
-    echo "$desired_header" > "$info_csv"
+          if [[ -s assemblies/assembly_info.csv ]]; then
+            echo "==== assemblies/assembly_info.csv ===="
+            if command -v column >/dev/null 2>&1; then
+              column -s, -t assemblies/assembly_info.csv | sed 's/^/  /'
+            else
+              sed 's/^/  /' assemblies/assembly_info.csv
+            fi
+            echo "======================================"
+          else
+            echo "[warn] No summary CSVs found to build assemblies/assembly_info.csv; available assemblies:"
+            shopt -s nullglob
+            for f in assemblies/*.result.fasta; do
+              b=$(basename "$f"); echo "  - ${b%.result.fasta}"
+            done
+          fi
+        fi
 
-    # Append rows from each part, reordering columns to match desired header and skipping each part's own header
-    for f in "${parts[@]}"; do
-      awk -v TARGET="$desired_header" -F',' -v OFS=',' '
-        BEGIN{
-          n=split(TARGET, want, ",")
-          for(i=1;i<=n;i++){ gsub(/^ *| *$/,"", want[i]); lwant[i]=tolower(want[i]) }
-          printed=0
-        }
-        NR==1{
-          # build header map from this file
-          for(i=1;i<=NF;i++){
-            gsub(/\r/,"",$i); h=$i; gsub(/^ *| *$/,"",h)
-            l=tolower(h); hmap[l]=i
-          }
-          # build column indices for desired order
-          for(i=1;i<=n;i++){ idx[i]= (lwant[i] in hmap ? hmap[lwant[i]] : 0) }
-          next
-        }
-        NR>1{
-          # emit row in desired order
-          row=""
-          for(i=1;i<=n;i++){
-            v=(idx[i]>0 && idx[i]<=NF)? $idx[i] : ""
-            gsub(/\r/,"",v)
-            row = (i==1)? v : (row OFS v)
-          }
-          print row
-        }' "$f" >> "$info_csv"
-    done
-  fi
+        # --- interactive selection for assembler (Step 12) ---
+        valid_assemblers="canu external flye ipa nextDenovo peregrine RAFT-hifiasm"
+        if [[ -z "${assembler:-}" ]]; then
+          if ! prompt_from_tty assembler "Enter the assembler to use for the final merge (e.g., ${valid_assemblers// /, }): "; then
+            echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
+            exit 2
+          fi
+        fi
+        while :; do
+          assembler="$(printf "%s" "$assembler" | awk '{$1=$1};1')"
+          if printf ' %s ' "$valid_assemblers" | grep -q " $assembler "; then
+            break
+          fi
+          echo "[warn] '$assembler' is not a valid assembler." >&2
+          if ! prompt_from_tty assembler "Enter one of [${valid_assemblers// /, }]: "; then
+            echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
+            exit 2
+          fi
+        done
+        # --- end interactive selection ---
 
-  # Show assembly_info.csv if present; otherwise list available assemblies
-  if [[ -s assemblies/assembly_info.csv ]]; then
-    echo "==== assemblies/assembly_info.csv ===="
-    if command -v column >/dev/null 2>&1; then
-      column -s, -t assemblies/assembly_info.csv | sed 's/^/  /'
-    else
-      sed 's/^/  /' assemblies/assembly_info.csv
-    fi
-    echo "======================================"
-  else
-    echo "[warn] No summary CSVs found to build assemblies/assembly_info.csv; available assemblies:"
-    shopt -s nullglob
-    for f in assemblies/*.result.fasta; do
-      b=$(basename "$f"); echo "  - ${b%.result.fasta}"
-    done
-  fi
+        # Validate choice by checking the FASTA file exists
+        asm_fa="assemblies/${assembler}.result.fasta"
+        if [[ ! -s "$asm_fa" ]]; then
+          echo "[error] Selected assembler '$assembler' does not have '$asm_fa'." >&2
+          echo "       Tip: choices are based on files named assemblies/<name>.result.fasta" >&2
+          exit 1
+        fi
 
-  
-fi
+        # Merge chosen assembly with t2t_clean.fasta
+        log_version "merge_wrapper.py" "merge_wrapper.py" 2>/dev/null || true
+        merge_wrapper.py -l 1000000 "$asm_fa" "t2t_clean.fasta" --prefix "${assembler}"
+        check_command
 
-# --- interactive selection for assembler (Step 12) ---
-valid_assemblers="canu external flye ipa nextDenovo peregrine RAFT-hifiasm"
+        # Locate merged output produced by merge_wrapper.py
+        merged_fa=""
+        for cand in "merged_${assembler}.fasta" "merged_${assembler}.fa" "${assembler}.fasta" "${assembler}.fa"; do
+          if [[ -s "$cand" ]]; then merged_fa="$cand"; break; fi
+        done
+        if [[ -z "$merged_fa" ]]; then
+          echo "[error] Could not find merged FASTA for prefix '${assembler}' after merge_wrapper.py" >&2
+          exit 1
+        fi
+        echo "[ok] Using merged FASTA: $merged_fa"
 
-# If not chosen via --choose, prompt now
-if [[ -z "${assembler:-}" ]]; then
-  if ! prompt_from_tty assembler "Enter the assembler to use for the final merge (e.g., ${valid_assemblers// /, }): "; then
-    echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
-    exit 2
-  fi
-fi
+        # === Protect t2t contigs during redundans ===
+        awk '/^>/{gsub(/^>/,""); print $1}' t2t_clean.fasta > assemblies/.protected.ids
 
-# Validate selection and re-prompt if needed
-while :; do
-  assembler="$(printf "%s" "$assembler" | awk '{$1=$1};1')"
-  if printf ' %s ' "$valid_assemblers" | grep -q " $assembler "; then
-    break
-  fi
-  echo "[warn] '$assembler' is not a valid assembler." >&2
-  if ! prompt_from_tty assembler "Enter one of [${valid_assemblers// /, }]: "; then
-    echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
-    exit 2
-  fi
-done
-# --- end interactive selection ---
+        python3 - <<'PY'
+import sys
+from pathlib import Path
 
-# Validate choice by checking the FASTA file exists
-asm_fa="assemblies/${assembler}.result.fasta"
-if [[ ! -s "$asm_fa" ]]; then
-  echo "[error] Selected assembler '$assembler' does not have '$asm_fa'." >&2
-  echo "       Tip: choices are based on files named assemblies/<name>.result.fasta" >&2
-  exit 1
-fi
+merged = Path(sys.argv[1])
+t2t    = Path(sys.argv[2])
+prot_ids = {ln.strip().split()[0] for ln in open(t2t) if ln.startswith(">")}
 
-# Merge chosen assembly with t2t_clean.fasta (single-stage; no external_fasta)
-merge_wrapper.py -l 1000000 "$asm_fa" "t2t_clean.fasta" --prefix "${assembler}"
-check_command
+def read_fa(p):
+    name=None; seq=[]
+    with open(p) as f:
+        for ln in f:
+            if ln.startswith(">"):
+                if name is not None:
+                    yield name, "".join(seq)
+                name=ln[1:].strip().split()[0]
+                seq=[]
+            else:
+                seq.append(ln.strip())
+    if name is not None:
+        yield name, "".join(seq)
 
-# Locate merged output produced by merge_wrapper.py
-merged_fa=""
-for cand in "merged_${assembler}.fasta" "merged_${assembler}.fa" "${assembler}.fasta" "${assembler}.fa"; do
-  if [[ -s "$cand" ]]; then merged_fa="$cand"; break; fi
-done
-if [[ -z "$merged_fa" ]]; then
-  echo "[error] Could not find merged FASTA for prefix '${assembler}' after merge_wrapper.py" >&2
-  exit 1
-fi
-echo "[ok] Using merged FASTA: $merged_fa"
+prot_out = Path("assemblies/protected.t2t.fa")
+oth_out  = Path("assemblies/others.fa")
 
-# Run redundans
-check_command
-eval "$(conda shell.bash hook)"
-conda deactivate
-conda activate redundans
-redundans.py --noscaffolding --nogapclosing -t "${threads:-8}" -f "$merged_fa" --identity 0.50 --overlap 0.80 --log redundans.log
+with open(prot_out,"w") as po, open(oth_out,"w") as oo:
+    for name,seq in read_fa(merged):
+        tgt = po if name in prot_ids else oo
+        tgt.write(f">{name}
+")
+        for i in range(0,len(seq),60):
+            tgt.write(seq[i:i+60]+"
+")
+print("[split] wrote", prot_out, "and", oth_out, file=sys.stderr)
+PY
+        "$merged_fa" t2t_clean.fasta
+        check_command
 
-# Sort final contigs
-eval "$(conda shell.bash hook)"
-conda deactivate
-conda activate funannotate
-check_command
-( eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate funannotate 2>/dev/null || true; \
-  if ! command -v funannotate >/dev/null 2>&1; then echo "[error] funannotate not found in env \"funannotate\"" >&2; exit 127; fi; \
-  funannotate sort -i redundans/scaffolds.reduced.fa -b contig -o "merged_${assembler}_sort.fa" --minlen 500 )
-check_command
+        # Run redundans ONLY on 'others'
+        eval "$(conda shell.bash hook)"
+        conda deactivate
+        conda activate redundans
+        log_version "redundans.py" "redundans.py" 2>/dev/null || true
+        redundans.py --noscaffolding --nogapclosing -t "${threads:-8}" -f assemblies/others.fa --identity 0.50 --overlap 0.80 --log redundans.log
+        check_command
 
-# === NEW: publish the canonical final assembly path ===
-if [[ ! -d assemblies ]]; then
-  echo "[error] 'assemblies' folder not found (expected to exist)." >&2
-  exit 1
-fi
-cp -f "merged_${assembler}_sort.fa" "assemblies/final.merged.fasta"
-echo "[ok] Wrote assemblies/final.merged.fasta"
-      ;;
-    
+        reduced_others="redundans/scaffolds.reduced.fa"
+        if [[ ! -s "$reduced_others" ]]; then
+          echo "[error] redundans reduced FASTA not found at $reduced_others" >&2
+          exit 1
+        fi
+
+        # Optional filter: drop others that are redundant to t2t (id>=0.50, cov>=0.80)
+        eval "$(conda shell.bash hook)"
+        conda deactivate
+        conda activate pacbiohifi 2>/dev/null || true
+        if command -v minimap2 >/dev/null 2>&1; then
+          log_version "minimap2" "minimap2" 2>/dev/null || true
+          paf="assemblies/others_vs_t2t.paf"
+          minimap2 -x asm20 -t "${threads:-8}" t2t_clean.fasta "$reduced_others" > "$paf"
+          python3 - <<'PY'
+import sys
+best = {}
+with open(sys.argv[1]) as f:
+    for ln in f:
+        if ln.startswith("#") or not ln.strip(): continue
+        t = ln.rstrip("
+").split("	")
+        if len(t) < 12: continue
+        qname, qlen, qstart, qend = t[0], int(t[1]), int(t[2]), int(t[3])
+        tags = {kv.split(":")[0]: kv for kv in t[12:]}
+        alnlen = abs(qend - qstart)
+        if alnlen == 0: continue
+        ident = None
+        if 'NM' in tags:
+            nm = int(tags['NM'].split(":")[-1])
+            ident = max(0.0, 1.0 - (nm / max(1, alnlen)))
+        elif 'de' in tags:
+            try:
+                de = float(tags['de'].split(":")[-1])
+                ident = max(0.0, 1.0 - de)
+            except: pass
+        if ident is None: 
+            continue
+        cov = alnlen / float(qlen)
+        cur = best.get(qname, (0.0, 0.0))
+        if cov > cur[0] or (abs(cov-cur[0])<1e-6 and ident > cur[1]):
+            best[qname] = (cov, ident)
+drop = {q for q,(cov,iden) in best.items() if cov >= 0.80 and iden >= 0.50}
+keep = []
+with open(sys.argv[2]) as f:
+    name=None; seq=[]
+    for ln in f:
+        if ln.startswith(">"):
+            if name is not None and name not in drop:
+                keep.append(name)
+            name=ln[1:].strip().split()[0]
+    if name is not None and name not in drop:
+        keep.append(name)
+print("\n".join(keep))
+PY
+          "$paf" "$reduced_others" > assemblies/others.keep.ids
+
+          python3 - <<'PY'
+import sys
+ids = set(ln.strip() for ln in open(sys.argv[1]) if ln.strip())
+inp = sys.argv[2]
+outp = sys.argv[3]
+with open(inp) as f, open(outp,"w") as o:
+    name=None; seq=[]
+    def flush():
+        if name is not None and name in ids:
+            o.write(f">{name}
+")
+            for i in range(0,len(seq),60): o.write(seq[i:i+60]+"
+")
+    for ln in f:
+        if ln.startswith(">"):
+            flush()
+            name=ln[1:].strip().split()[0]
+            seq=[]
+        else:
+            seq.append(ln.strip())
+    flush()
+PY
+          assemblies/others.keep.ids "$reduced_others" assemblies/others.filtered.fa
+        else
+          echo "[warn] minimap2 not found; keeping all reduced 'others' without extra filtering." >&2
+          cp -f "$reduced_others" assemblies/others.filtered.fa
+        fi
+
+        # Recombine: protected t2t + filtered others
+        cat assemblies/protected.t2t.fa assemblies/others.filtered.fa > assemblies/merged_protected_priority.fa
+        echo "[ok] Built assemblies/merged_protected_priority.fa (t2t protected)"
+
+        # Sort final contigs
+        eval "$(conda shell.bash hook)"
+        conda deactivate
+        conda activate funannotate
+        check_command
+        log_version "funannotate" "funannotate" 2>/dev/null || true
+        ( eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate funannotate 2>/dev/null || true;           if ! command -v funannotate >/dev/null 2>&1; then echo "[error] funannotate not found in env "funannotate"" >&2; exit 127; fi;           funannotate sort -i assemblies/merged_protected_priority.fa -b contig -o "merged_${assembler}_sort.fa" --minlen 500 )
+        check_command
+
+        # Publish final
+        if [[ ! -d assemblies ]]; then
+          echo "[error] 'assemblies' folder not found (expected to exist)." >&2
+          exit 1
+        fi
+        cp -f "merged_${assembler}_sort.fa" "assemblies/final.merged.fasta"
+        echo "[ok] Wrote assemblies/final.merged.fasta"
+        ;;
+
 13)
 # Step 13 - BUSCO analysis for final merged assembly (reuse existing results; JSON/TXT/TSV parsing)
 echo "Step 13 - BUSCO analysis"
@@ -1356,6 +1504,14 @@ fi
 
 # 3) Compute metrics (same logic as for individual assemblies)
 double=$(awk 'NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {c=$1; sub(/[ \t].*$/,"",c); if($2==0 && $3==$4) print c}' "$list" | sort -u | wc -l)
+  # v0.2.2 override: correct double-end contig counting (both ends flagged)
+  double=$(awk '
+    NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
+      c=$1; sub(/[ \t].*$/,"",c);
+      s[c]+=($2==0)?1:0; e[c]+=($3==$4)?1:0
+    }
+    END{ for(c in s){ if(s[c]>0 && e[c]>0) print c } }
+  ' "$list" | sort -u | wc -l)
 single=$(awk '
   NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
     c=$1; sub(/[ \t].*$/,"",c);
