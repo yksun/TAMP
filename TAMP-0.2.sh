@@ -1,5 +1,125 @@
 #!/bin/bash
-# Version: TAMP-0.12
+
+# ===== Version logging helpers =====
+VERSION_FILE="${VERSION_FILE:-version.txt}"
+
+init_version_file() {
+  if [[ ! -f "$VERSION_FILE" ]]; then
+    {
+      echo "Pipeline: ${0##*/}"
+      echo "Run ID:   $(date +%Y%m%d_%H%M%S)"
+      echo "Date:     $(date '+%Y-%m-%d %H:%M:%S')"
+      echo "Host:     $(hostname)"
+      echo
+      echo "Software versions:"
+    } > "$VERSION_FILE"
+  fi
+}
+
+log_version() {
+  # usage: log_version <label> <cmd>
+  local label="$1"; shift
+  local cmd="$1"; shift || true
+  init_version_file
+  if ! grep -q "^${label}:" "$VERSION_FILE" 2>/dev/null; then
+    local ver="NOT FOUND"
+    if command -v "$cmd" >/dev/null 2>&1; then
+      local out=""
+      for probe in \
+        "$cmd --version" \
+        "$cmd -V" \
+        "$cmd version" \
+        "$cmd -v" \
+        "$cmd 2>&1"; do
+        out=$(eval $probe 2>&1 | head -n 1) || true
+        if [[ -n "$out" ]]; then ver="$out"; break; fi
+      done
+    fi
+    echo "${label}: ${ver}" >> "$VERSION_FILE"
+  fi
+}
+# ===================================
+
+# --- helper: rename contigs to <prefix>_1..N by descending length (wrap at 60bp) ---
+rename_and_sort_fasta() {
+  # usage: rename_and_sort_fasta INPUT.fa OUTPUT.fa PREFIX
+  local infa="$1"; local outfa="$2"; local prefix="$3"
+  if [[ ! -s "$infa" ]]; then
+    echo "[warn] rename_and_sort_fasta: input '$infa' missing or empty; skipping." >&2
+    return 0
+  fi
+  local py="$(mktemp -t rename_fa.XXXXXX.py)"
+  cat > "$py" <<'PY'
+import sys
+
+def read_fasta(fp):
+  name=None; seq=[]
+  for line in fp:
+    if line.startswith('>'):
+      if name is not None:
+        yield name, ''.join(seq)
+      name=line[1:].strip()
+      seq=[]
+    else:
+      seq.append(line.strip())
+  if name is not None:
+    yield name, ''.join(seq)
+
+def wrap(s, w=60):
+  return '\n'.join(s[i:i+w] for i in range(0, len(s), w)) if s else ''
+
+inp, outp, prefix = sys.argv[1:4]
+with open(inp, 'r') as f:
+  recs = list(read_fasta(f))
+
+# sort by length desc, stable
+recs.sort(key=lambda x: len(x[1]), reverse=True)
+
+with open(outp, 'w') as o:
+  for i, (name, seq) in enumerate(recs, start=1):
+    o.write(f">{prefix}_{i}\n")
+    o.write(wrap(seq) + ("\n" if seq and not seq.endswith("\n") else ""))
+log_version "python3" "python3"
+PY
+  python3 "$py" "$infa" "$outfa" "$prefix"
+  local rc=$?
+  rm -f "$py"
+  return $rc
+}
+# --- end helper ---
+
+
+# ==== Interactive prompt helpers (inserted by fix) ====
+# Open a dedicated read-only file descriptor to the terminal for robust prompts
+if [ -z "${__TTY_FD3_OPENED__:-}" ] && [ -r /dev/tty ]; then
+  exec 3</dev/tty
+  __TTY_FD3_OPENED__=1
+fi
+
+# Print a prompt directly to the terminal and read from terminal (works even in pipelines/tee)
+prompt_from_tty() {
+  # usage: prompt_from_tty VAR "Your prompt: "
+  local __outvar=$1; shift
+  local __prompt="$*"
+  if [ -r /dev/tty ]; then
+    # show prompt immediately on real terminal
+    printf "%s" "$__prompt" > /dev/tty
+    local __ans=""
+    if [ -e /proc/self/fd/3 ]; then
+      IFS= read -r __ans <&3 || __ans=""
+    else
+      IFS= read -r __ans < /dev/tty || __ans=""
+    fi
+    # Trim leading/trailing whitespace
+    __ans="$(printf "%s" "$__ans" | awk '{$1=$1};1')"
+    printf -v "$__outvar" '%s' "$__ans"
+    return 0
+  fi
+  return 1
+}
+# ==== end helpers ====
+
+# Version: TAMP-0.2
 
 # Default values
 genomesize=""
@@ -7,7 +127,8 @@ threads=20
 fastq=""
 steps=()
 motif="AACCCT"
-assembler="peregrine" # Default assembler
+# assembler default changed to empty to force prompt when --choose not given
+assembler="" # Default assembler
 external_fasta=""  # Optional external pre-assembled FASTA provided by user
 run_busco=false    # Whether to run BUSCO on individual assemblies
 busco_lineage="ascomycota_odb10"  # Default BUSCO lineage
@@ -23,7 +144,7 @@ LOG_AWK='{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }'
 timestamp() { date +"%Y-%m-%d %H:%M:%S"; }
 
 write_versions() {
-  local vf="version.log"
+  local vf="version.txt"
   {
     echo "Pipeline: ${PIPELINE_NAME}"
     echo "Run ID:   ${RUN_ID}"
@@ -78,7 +199,7 @@ Options:
 
 Notes:
   • Per-step logs: logs/step_<N>.log with timestamps.
-  • A consolidated software version summary is written to ./version.log at start.
+  • A consolidated software version summary is written to ./version.txt at start.
   • Example: ${PIPELINE_NAME:-$0} -g 2g -t 16 --fastq reads.fastq -m AACCCT -s 1,3-5 --choose
 
 Steps:
@@ -238,7 +359,13 @@ check_command() {
     echo "Error: Command failed. Exiting."
     exit 1
   fi
+  if [[ -n "${1:-}" && "${1#-}" = "$1" ]]; then
+    if [[ "$1" != *" "* ]]; then
+      log_version "$1" "$1"
+    fi
+  fi
 }
+
 
 echo "Activating assembly environment"
 eval "$(conda shell.bash hook)"
@@ -257,11 +384,13 @@ for step in "${steps[@]}"; do
     echo "===== [$(timestamp)] STEP ${step} START ====="
     case $step in
     1)
+log_version "canu" "canu"
       echo "Step 1 - Assembly of the genome using HiCanu"
       canu -p canu -d hicanu genomeSize=$genomesize maxThreads=$threads -pacbio-hifi $fastq
       check_command
       ;;
     2)
+log_version "nextDenovo" "nextDenovo"
       echo "Step 2 - Assembly of the genome using NextDenovo"
       nextDenovo run_${project}.cfg
       check_command
@@ -272,11 +401,13 @@ for step in "${steps[@]}"; do
       check_command
       ;;
     4)
+log_version "ipa" "ipa"
       echo "Step 4 - Assembly of the genome using IPA"
       ipa local --nthreads $threads --njobs 1 --run-dir ipa -i $fastq
       check_command
       ;;
     5)
+log_version "flye" "flye"
       echo "Step 5 - Assembly of the genome using Flye"
       flye --pacbio-hifi $fastq --out-dir flye --threads $threads
       check_command
@@ -284,6 +415,7 @@ for step in "${steps[@]}"; do
     6)
       echo "Step 6 - Assembly of the genome using Hifiasm"
       mkdir hifiasm
+log_version "hifiasm" "hifiasm"
       cd hifiasm
       hifiasm -o errorcorrect -t$threads --write-ec ../$fastq 2> errorcorrect.log
       check_command
@@ -300,11 +432,35 @@ for step in "${steps[@]}"; do
       echo "Step 7 - Copy all assemblies"
       mkdir -p assemblies
       cp ./hicanu/canu.contigs.fasta ./assemblies/canu.result.fasta
+      # Normalize headers: canu_1..N by contig length
+      tmp_renamed="assemblies/.canu.renamed.tmp.fasta"
+      rename_and_sort_fasta "./assemblies/canu.result.fasta" "$tmp_renamed" "canu" && mv -f "$tmp_renamed" "./assemblies/canu.result.fasta"
+
       cp ./NextDenovo/03.ctg_graph/nd.asm.fasta ./assemblies/nextDenovo.result.fasta
+      # Normalize headers: nextDenovo_1..N by contig length
+      tmp_renamed="assemblies/.nextDenovo.renamed.tmp.fasta"
+      rename_and_sort_fasta "./assemblies/nextDenovo.result.fasta" "$tmp_renamed" "nextDenovo" && mv -f "$tmp_renamed" "./assemblies/nextDenovo.result.fasta"
+
       cp ./peregrine-2021/asm_ctgs_m_p.fa ./assemblies/peregrine.result.fasta
+      # Normalize headers: peregrine_1..N by contig length
+      tmp_renamed="assemblies/.peregrine.renamed.tmp.fasta"
+      rename_and_sort_fasta "./assemblies/peregrine.result.fasta" "$tmp_renamed" "peregrine" && mv -f "$tmp_renamed" "./assemblies/peregrine.result.fasta"
+
       cp ./ipa/assembly-results/final.p_ctg.fasta ./assemblies/ipa.result.fasta
+      # Normalize headers: ipa_1..N by contig length
+      tmp_renamed="assemblies/.ipa.renamed.tmp.fasta"
+      rename_and_sort_fasta "./assemblies/ipa.result.fasta" "$tmp_renamed" "ipa" && mv -f "$tmp_renamed" "./assemblies/ipa.result.fasta"
+
       cp ./flye/assembly.fasta ./assemblies/flye.result.fasta
+      # Normalize headers: flye_1..N by contig length
+      tmp_renamed="assemblies/.flye.renamed.tmp.fasta"
+      rename_and_sort_fasta "./assemblies/flye.result.fasta" "$tmp_renamed" "flye" && mv -f "$tmp_renamed" "./assemblies/flye.result.fasta"
+
       cp ./hifiasm/RAFT-hifiasm.fasta ./assemblies/RAFT-hifiasm.result.fasta
+      # Normalize headers: RAFT-hifiasm_1..N by contig length
+      tmp_renamed="assemblies/.RAFT-hifiasm.renamed.tmp.fasta"
+      rename_and_sort_fasta "./assemblies/RAFT-hifiasm.result.fasta" "$tmp_renamed" "RAFT-hifiasm" && mv -f "$tmp_renamed" "./assemblies/RAFT-hifiasm.result.fasta"
+
       # If user provided an external FASTA, include it as an assembly, too
       if [[ -n "$external_fasta" ]]; then
         # Normalize/resolve if relative path
@@ -315,7 +471,6 @@ for step in "${steps[@]}"; do
       # === Run BUSCO on all assembled genomes (including external) ===
       # Requires helper: run_busco_on_assembly()
       ;;
-
 
 8)
 echo "Step 8 - Run BUSCO on all assembled genomes (including external)"
@@ -380,6 +535,7 @@ for fasta in "${a[@]}"; do
   fi
 
   echo "[run] BUSCO on $base (lineage=$lineage, threads=$threads)"
+log_version "busco" "busco"
   pushd busco >/dev/null
   busco -i "../$fasta" -l "$lineage" -m genome -c "$threads" -o "$base" $force_flag 2>&1 | tee "busco_${base}.log" || true
   popd >/dev/null
@@ -542,6 +698,7 @@ for fasta in assemblies/*.result.fasta; do
   list="${fasta%.result.fasta}.telo.list"
   out="${fasta%.result.fasta}.telo.fasta"
 
+log_version "seqtk" "seqtk"
   # 1) Find telomere-containing contigs and write list
   seqtk telo -s 1 -m "$motif" "$fasta" > "$list"
   check_command
@@ -652,6 +809,7 @@ check_command
       for file1 in "${fasta_files[@]}"; do
         for file2 in "${fasta_files[@]}"; do
           base1=$(basename "$file1" .telo.fasta)
+log_version "merge_wrapper.py" "merge_wrapper.py"
           base2=$(basename "$file2" .telo.fasta)
           merge_wrapper.py -l 1000000 "$file1" "$file2" --prefix merged_"$base1"_"$base2"
           check_command
@@ -818,11 +976,20 @@ echo "Done: assemblies/assembly.quast.csv"
 echo "Step 12 - Final merge"
 
 # Parse optional --choose argument
+# assembler default changed to empty to force prompt when --choose not given
 assembler=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --choose)    assembler="$2"; shift 2 ;;
-    --choose=*)  assembler="${1#--choose=}"; shift ;;
+    --choose)
+      CHOOSE_FLAG=1
+      if [ -n "${2:-}" ] && [ "${2#-}" != "$2" ] ; then
+        # next token is another flag; stay interactive
+        :
+      else
+        if [ -n "${2:-}" ]; then assembler="$2"; shift; fi
+      fi
+      shift
+      ;;
     *)           shift ;;
   esac
 done
@@ -894,9 +1061,33 @@ if [[ -z "$assembler" ]]; then
     done
   fi
 
-  echo -n "Enter the assembler to use for the final merge (e.g., canu, external, flye, ipa, nextDenovo, peregrine, RAFT-hifiasm): "
-  read assembler
+  
 fi
+
+# --- interactive selection for assembler (Step 12) ---
+valid_assemblers="canu external flye ipa nextDenovo peregrine RAFT-hifiasm"
+
+# If not chosen via --choose, prompt now
+if [[ -z "${assembler:-}" ]]; then
+  if ! prompt_from_tty assembler "Enter the assembler to use for the final merge (e.g., ${valid_assemblers// /, }): "; then
+    echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
+    exit 2
+  fi
+fi
+
+# Validate selection and re-prompt if needed
+while :; do
+  assembler="$(printf "%s" "$assembler" | awk '{$1=$1};1')"
+  if printf ' %s ' "$valid_assemblers" | grep -q " $assembler "; then
+    break
+  fi
+  echo "[warn] '$assembler' is not a valid assembler." >&2
+  if ! prompt_from_tty assembler "Enter one of [${valid_assemblers// /, }]: "; then
+    echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
+    exit 2
+  fi
+done
+# --- end interactive selection ---
 
 # Validate choice by checking the FASTA file exists
 asm_fa="assemblies/${assembler}.result.fasta"
@@ -961,6 +1152,10 @@ if [[ ! -s "$final_fa" ]]; then
   echo "[error] Final merged FASTA '$final_fa' not found." >&2
   exit 1
 fi
+
+
+
+
 [[ -d assemblies ]] || { echo "[error] 'assemblies' folder not found."; exit 1; }
 [[ -d busco ]] || mkdir busco
 
@@ -1421,7 +1616,7 @@ echo "Step 17 - Cleanup temporary files"
 cleanup_temp() {
   echo "Cleanup: organizing temporary outputs…"
   shopt -s nullglob dotglob extglob nocaseglob
-  mkdir -p temp/merge temp/merge/fasta temp/merge/param temp/busco log
+  mkdir -p temp/merge temp/merge/fasta temp/merge/param temp/busco temp/log final_results
   find . -maxdepth 1 -type f -name 'aln_summary_merged*.tsv'   -exec mv -f -- {} temp/merge/ \; 2>/dev/null || true
   find . -maxdepth 1 -type f -name 'anchor_summary_merged_*.txt' -exec mv -f -- {} temp/merge/ \; 2>/dev/null || true
   find . -maxdepth 1 -type f \( -name '.merged_*' -o -name 'merged_*.delta' -o -name 'merged_*.coords' -o -name 'merged_*.snps' -o -name 'merged_*.delta.*' -o -name 'merged_*.crunch' -o -name 'merged_*.filter' -o -name 'merged_*.qdiff' -o -name 'merged_*.rdiff' -o -name 'merged_*.mcoords' \) \
@@ -1438,8 +1633,10 @@ cleanup_temp() {
   for f in *.log; do
     [[ -f "$f" ]] || continue
     [[ "$f" == *busco* ]] && continue
-    mv -f -- "$f" log/
+    mv -f -- "$f" temp/log/
   done
+  mv -f -- final_result.csv final_results/
+  mv -f -- assemblies/final.merged.fasta final_results/
   echo "[ok] Cleanup complete."
 }
 cleanup_temp
