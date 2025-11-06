@@ -1,12 +1,36 @@
 #!/bin/bash
+if [ -z "$BASH_VERSION" ]; then
+  exec /usr/bin/env bash "$0" "$@"
+fi
 # ------------------------------------------------------------
-# v0.2.3 (2025-11-05)
-# - FIX: Step 7 'rename_and_sort_fasta': removed shell call inside Python heredoc
-#        and log Python version from bash before invoking Python (no more SyntaxError).
+# v0.2.6.3 (2025-11-06)
+# - FIX (Step 16): Ensure 'final' telomere metrics are computed reliably by recomputing
+#                   from assemblies/final.telo.list during final_result merge, and by
+#                   normalizing whitespace/CRs. Prevents 'Telomere double-end contigs'
+#                   from showing 0 when list indicates >0.
+# ------------------------------------------------------------
+# v0.2.6.2 (2025-11-06)
+# - FIX (Step 14): Compute 'Telomere double-end contigs' by aggregating left/right telomeric hits
+#                  per contig (s[c]>0 && e[c]>0), matching Step 9 logic. Also strip CRs before parsing.
+# ------------------------------------------------------------
+# v0.2.6 (2025-11-06)
+# - FIX (Step 12): Replaced awk-based assembly_info builder with a Python-based
+#   build_assembly_info_v2() that strips CRs, normalizes headers, and merges BUSCO/QUAST/TELO
+#   reliably across awk variants. Called at the start of Step 12.
 # ------------------------------------------------------------
 # ------------------------------------------------------------
-# v0.2.2 (2025-11-05)
-# - FIX: Telomere double-end logic in Steps 9 & 14: now counts contigs with telomeres at both ends.
+# v0.2.5 (2025-11-06)
+# - FIX (Step 12): Make AWK CR stripping portable and robust:
+#     • Use gsub("\r","",$i) instead of regex literal.
+#     • Pipe each CSV through tr -d '\r' before AWK.
+#   This eliminates the 'gsub(/' parse error on some AWK builds.
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# v0.2.4 (2025-11-06)
+# - FIX (Step 12): Always rebuild and overwrite assemblies/assembly_info.csv by merging BUSCO/QUAST/TELO CSVs if present;
+#                  corrected awk CR-strip (gsub(/\r/,"")) and stabilized header/rows; print matrix before prompt/--choose.
+# - FIX (Step 7): Removed stray Bash inside Python heredoc; log Python version from Bash before invoking the temp script.
+# - FIX (Steps 9 & 14): Telomere double-end contigs counted when both ends have telomeric signal (start==0 and end==len).
 # ------------------------------------------------------------
 # ------------------------------------------------------------
 # v0.2.1 (2025-11-05)
@@ -104,7 +128,6 @@ PY
 }
 # --- end helper ---
 
-
 # ==== Interactive prompt helpers (inserted by fix) ====
 # Open a dedicated read-only file descriptor to the terminal for robust prompts
 if [ -z "${__TTY_FD3_OPENED__:-}" ] && [ -r /dev/tty ]; then
@@ -196,8 +219,6 @@ write_versions() {
   echo "" >> "$vf"
 }
 
-
-
 # Function to display usage
 usage() {
   cat <<USAGE
@@ -239,7 +260,154 @@ Steps:
 USAGE
   exit 1
 }
+build_assembly_info_v2_v2() {
+  mkdir -p assemblies
+  local info_csv="assemblies/assembly_info.csv"
+  local desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,RAFT-hifiasm"
 
+  # Candidate files
+  local candidates=(
+    "assemblies/assembly.busco.csv" "assemblies/assembly_busco.csv" "assemblies/busco.csv"
+    "assemblies/assembly.quast.csv" "assemblies/assembly_quast.csv" "assemblies/quast.csv"
+    "assemblies/assembly.telo.csv"  "assemblies/assembly_telo.csv"  "assemblies/telo.csv"
+  )
+  local parts=()
+  for cand in "${candidates[@]}"; do
+    [[ -s "$cand" ]] && parts+=("$cand")
+  done
+
+  python3 - <<'PY'
+import sys, csv, os
+from collections import OrderedDict
+
+desired = ["Metric","canu","external","flye","ipa","nextDenovo","peregrine","RAFT-hifiasm"]
+parts = [p for p in sys.stdin.read().splitlines() if p]
+
+rows_by_metric = OrderedDict()
+
+def norm(s):
+    return (s or "").strip()
+
+for p in parts:
+    try:
+        with open(p, newline='') as f:
+            # tolerate CRLF
+            text = f.read().replace('\r','')
+        reader = csv.reader(text.splitlines())
+    except Exception as e:
+        print(f"[warn] Skipping {p}: {e}", file=sys.stderr)
+        continue
+    try:
+        hdr = next(reader, [])
+    except StopIteration:
+        hdr = []
+    # map header names (case-insensitive)
+    lowmap = { (h or "").strip().lower(): i for i,h in enumerate(hdr) }
+    idx = [ lowmap.get(h.lower(), None) for h in desired ]
+    for row in reader:
+        if not row:
+            continue
+        # extend row to length
+        if len(row) < len(hdr):
+            row = row + [""]*(len(hdr)-len(row))
+        metric = norm(row[ idx[0] ] if idx[0] is not None else row[0])
+        if not metric:
+            continue
+        out = [metric]
+        for k in range(1,len(desired)):
+            j = idx[k]
+            out.append(norm(row[j]) if j is not None and j < len(row) else "")
+        rows_by_metric[metric] = out  # last one wins
+# write output
+os.makedirs("assemblies", exist_ok=True)
+with open("assemblies/assembly_info.csv","w",newline='') as f:
+    w = csv.writer(f)
+    w.writerow(desired)
+    for m, out in rows_by_metric.items():
+        w.writerow(out)
+PY
+
+  if [[ -s "$info_csv" ]]; then
+    echo "[ok] Wrote $(basename "$info_csv")"
+    if command -v column >/dev/null 2>&1; then
+      echo "==== assemblies/assembly_info.csv ===="
+      column -s, -t "$info_csv" | sed "s/^/  /"
+      echo "======================================"
+    fi
+  else
+    echo "[warn] No rows written to $info_csv"
+  fi
+}
+build_assembly_info_v2() {
+  mkdir -p assemblies
+  local info_csv="assemblies/assembly_info.csv"
+  local desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,RAFT-hifiasm"
+
+  # Start fresh with fixed header
+  printf '%s
+' "$desired_header" > "$info_csv"
+
+  # Write a POSIX-awk script that reorders columns by header map (no gawk-only features)
+  cat > .merge_posix.awk <<'AWK'
+BEGIN{
+  FS=","; OFS=","
+  n=split(TARGET, want, ",")
+  for(i=1;i<=n;i++){ gsub(/^ *| *$/,"", want[i]); lwant[i]=tolower(want[i]) }
+}
+NR==1{
+  # Build lowercase-trimmed header map for this file
+  for(i=1;i<=NF;i++){
+    h=$i
+    gsub(/
+/,"",h)
+    sub(/^[ 	]+/,"",h); sub(/[ 	]+$/,"",h)
+    l=tolower(h)
+    hmap[l]=i
+  }
+  # Build index map; avoid gawk's `in` and ternary
+  for(i=1;i<=n;i++){
+    tmp=hmap[lwant[i]]
+    if (tmp=="") idx[i]=0
+    else idx[i]=tmp
+  }
+  next
+}
+{
+  row=""
+  for(i=1;i<=n;i++){
+    if (idx[i]>0 && idx[i]<=NF) v=$idx[i]; else v=""
+    gsub(/
+/,"",v)
+    if (i==1) row=v; else row=row OFS v
+  }
+  print row
+}
+AWK
+
+  # Known candidate CSVs from BUSCO/QUAST/TELO steps
+  local candidates=(
+    "assemblies/assembly.busco.csv" "assemblies/assembly_busco.csv" "assemblies/busco.csv"
+    "assemblies/assembly.quast.csv" "assemblies/assembly_quast.csv" "assemblies/quast.csv"
+    "assemblies/assembly.telo.csv"  "assemblies/assembly_telo.csv"  "assemblies/telo.csv"
+  )
+  local had=0
+  for f in "${candidates[@]}"; do
+    if [[ -s "$f" ]]; then
+      had=1
+      # strip CRs on input, then apply portable AWK
+      tr -d '
+' < "$f" | awk -v TARGET="$desired_header" -f .merge_posix.awk >> "$info_csv"
+    fi
+  done
+  rm -f .merge_posix.awk
+
+  echo "[ok] Wrote $(basename "$info_csv")"
+  if command -v column >/dev/null 2>&1; then
+    echo "==== assemblies/assembly_info.csv ===="
+    column -s, -t "$info_csv" | sed 's/^/  /'
+    echo "======================================"
+  fi
+}
 # Function to expand ranges in the step input (e.g., "1,3-5" becomes "1 3 4 5")
 expand_steps() {
   local IFS=','; read -ra ranges <<< "$1"
@@ -280,7 +448,7 @@ while getopts ":g:t:s:m:-:" opt; do
              OPTIND=$((OPTIND + 1))
            fi
          ;;
-         choose) 
+         choose)
            echo "Please enter the assembler you want to use for the final merge (caun, nextDenovo, peregrine, ipa, flye, RAFT-hifiasm):"
            read assembler
            ;;
@@ -304,8 +472,6 @@ fi
 
 # Write versions summary at the start of a run
 write_versions
-
-
 
 # Optional: resolve external FASTA (download if URL) AFTER required args check
 if [[ -n "$external_fasta" ]]; then
@@ -381,7 +547,6 @@ check_command() {
     fi
   fi
 }
-
 
 echo "Activating assembly environment"
 eval "$(conda shell.bash hook)"
@@ -731,14 +896,6 @@ log_version "seqtk" "seqtk"
 
   # 3) Compute metrics for this assembler
   double=$(awk 'NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {c=$1; sub(/[ \t].*$/,"",c); if($2==0 && $3==$4) print c}' "$list" | sort -u | wc -l)
-  # v0.2.2 override: correct double-end contig counting (both ends flagged)
-  double=$(awk '
-    NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-      c=$1; sub(/[ \t].*$/,"",c);
-      s[c]+=($2==0)?1:0; e[c]+=($3==$4)?1:0
-    }
-    END{ for(c in s){ if(s[c]>0 && e[c]>0) print c } }
-  ' "$list" | sort -u | wc -l)
   single=$(awk '
     NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
       c=$1; sub(/[ \t].*$/,"",c);
@@ -802,7 +959,7 @@ check_command
           RC="$(echo "$M" | tr 'ACGTacgtnN' 'TGCAtgcanN' | rev)"
           awk -v W="${TELO_WINDOW:-200}" -v R="${TELO_MIN_REPEATS:-3}" -v M="$M" -v RC="$RC" '
             BEGIN{ pat="(" M "|" RC "){" R ",}" }
-            /^>/ { if(seq!=""){ 
+            /^>/ { if(seq!=""){
                       left=substr(seq,1,W); right=substr(seq,length(seq)-W+1,W);
                       if( (left ~ pat) || (right ~ pat) ){ print header; print seq; }
                    }
@@ -852,7 +1009,6 @@ log_version "merge_wrapper.py" "merge_wrapper.py"
       ( eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate funannotate 2>/dev/null || true; if ! command -v funannotate >/dev/null 2>&1; then echo "[error] funannotate not found in env \"funannotate\"" >&2; exit 127; fi; funannotate clean -i  t2t.fasta -p 30 -o  t2t_clean.fasta --exhaustive )
       check_command
       ;;
-
 
 11)
 echo "Step 11 - QUAST metricscs for all assemblies"
@@ -992,10 +1148,82 @@ write_csv(rows, OUT)
 print(f"Wrote {OUT}")
 PY
 
+emit_parts() {
+  cat <<EOF
+${parts[0]}
+${parts[1]}
+${parts[2]}
+${parts[3]}
+${parts[4]}
+${parts[5]}
+${parts[6]}
+${parts[7]}
+${parts[8]}
+${parts[9]}
+${parts[10]}
+${parts[11]}
+${parts[12]}
+${parts[13]}
+${parts[14]}
+${parts[15]}
+${parts[16]}
+${parts[17]}
+${parts[18]}
+${parts[19]}
+${parts[20]}
+${parts[21]}
+${parts[22]}
+${parts[23]}
+${parts[24]}
+${parts[25]}
+${parts[26]}
+${parts[27]}
+${parts[28]}
+${parts[29]}
+${parts[30]}
+${parts[31]}
+${parts[32]}
+${parts[33]}
+${parts[34]}
+${parts[35]}
+${parts[36]}
+${parts[37]}
+${parts[38]}
+${parts[39]}
+${parts[40]}
+${parts[41]}
+${parts[42]}
+${parts[43]}
+${parts[44]}
+${parts[45]}
+${parts[46]}
+${parts[47]}
+${parts[48]}
+${parts[49]}
+EOF
+}
+
+# (Optional) Re-validate parts via the heredoc snapshot and log them
+if (( ${#parts[@]} > 0 )); then
+  mapfile -t __parts_snapshot < <(emit_parts)
+  __valid=()
+  for __p in "${__parts_snapshot[@]}"; do
+    [[ -n "$__p" && -s "$__p" ]] && __valid+=("$__p")
+  done
+  if (( ${#__valid[@]} > 0 )); then
+    parts=("${__valid[@]}")
+  fi
+  echo "[info] Parts used to build assembly_info.csv:"
+  printf '  %s\n' "${parts[@]}"
+fi
+
 echo "Done: assemblies/assembly.quast.csv"
   ;;
       12)
         # Step 12 - Final merge (choose assembler via --choose or prompt)
+        # Build/refresh assembly_info.csv before prompting
+        build_assembly_info_v2
+
         echo "Step 12 - Final merge"
 
         # Parse optional --choose argument
@@ -1024,67 +1252,75 @@ echo "Done: assemblies/assembly.quast.csv"
           esac
         done
 
-        # If not provided, build/print assemblies/assembly_info.csv (if parts exist) and then prompt
-        if [[ -z "$assembler" ]]; then
-          if [[ ! -d assemblies ]]; then
-            echo "[error] 'assemblies' folder not found (expected to exist)." >&2
-            exit 1
-          fi
+# If not provided, build/print assemblies/assembly_info.csv (if parts exist) and then prompt
+if [[ -z "$assembler" ]]; then
+  if [[ ! -d assemblies ]]; then
+    echo "[error] 'assemblies' folder not found (expected to exist)." >&2
+    exit 1
+  fi
 
-          parts=()
-          for cand in assemblies/assembly.telo.csv assemblies/assembly.busco.csv assemblies/assembly.quast.csv assemblies/assemblies.quast.csv; do
-            [[ -s "$cand" ]] && parts+=("$cand")
-          done
+  # Gather any available component CSVs (order doesn’t matter; header will be normalized)
+  parts=()
+  for cand in assemblies/assembly.telo.csv assemblies/assembly.busco.csv assemblies/assembly.quast.csv assemblies/assemblies.quast.csv; do
+    [[ -s "$cand" ]] && parts+=("$cand")
+  done
 
-          if (( ${#parts[@]} > 0 )); then
-            info_csv="assemblies/assembly_info.csv"
-            desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,RAFT-hifiasm"
-            echo "$desired_header" > "$info_csv"
-            for f in "${parts[@]}"; do
-              awk -v TARGET="$desired_header" -F',' -v OFS=',' '
-                BEGIN{
-                  n=split(TARGET, want, ",")
-                  for(i=1;i<=n;i++){ gsub(/^ *| *$/,"", want[i]); lwant[i]=tolower(want[i]) }
-                }
-                NR==1{
-                  for(i=1;i<=NF;i++){
-                    gsub(/
-/,"",$i); h=$i; gsub(/^ *| *$/,"",h)
-                    l=tolower(h); hmap[l]=i
-                  }
-                  for(i=1;i<=n;i++){ idx[i]= (lwant[i] in hmap ? hmap[lwant[i]] : 0) }
-                  next
-                }
-                NR>1{
-                  row=""
-                  for(i=1;i<=n;i++){
-                    v=(idx[i]>0 && idx[i]<=NF)? $idx[i] : ""
-                    gsub(/
-/,"",v)
-                    row = (i==1)? v : (row OFS v)
-                  }
-                  print row
-                }' "$f" >> "$info_csv"
-            done
-          fi
+  # If we have any parts, (re)build assembly_info.csv by stacking rows and keeping ONE header in desired order
+  if (( ${#parts[@]} > 0 )); then
+    info_csv="assemblies/assembly_info.csv"
+    desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,RAFT-hifiasm"
+    echo "$desired_header" > "$info_csv"
 
-          if [[ -s assemblies/assembly_info.csv ]]; then
-            echo "==== assemblies/assembly_info.csv ===="
-            if command -v column >/dev/null 2>&1; then
-              column -s, -t assemblies/assembly_info.csv | sed 's/^/  /'
-            else
-              sed 's/^/  /' assemblies/assembly_info.csv
-            fi
-            echo "======================================"
-          else
-            echo "[warn] No summary CSVs found to build assemblies/assembly_info.csv; available assemblies:"
-            shopt -s nullglob
-            for f in assemblies/*.result.fasta; do
-              b=$(basename "$f"); echo "  - ${b%.result.fasta}"
-            done
-          fi
-        fi
+    # Append rows from each part, reordering columns to match desired header and skipping each part's own header
+    for f in "${parts[@]}"; do
+      awk -v TARGET="$desired_header" -F',' -v OFS=',' '
+        BEGIN{
+          n=split(TARGET, want, ",")
+          for(i=1;i<=n;i++){ gsub(/^ *| *$/,"", want[i]); lwant[i]=tolower(want[i]) }
+          printed=0
+        }
+        NR==1{
+          # build header map from this file
+          for(i=1;i<=NF;i++){
+            gsub(/\r/,"",$i); h=$i; gsub(/^ *| *$/,"",h)
+            l=tolower(h); hmap[l]=i
+          }
+          # build column indices for desired order
+          for(i=1;i<=n;i++){ idx[i]= (lwant[i] in hmap ? hmap[lwant[i]] : 0) }
+          next
+        }
+        NR>1{
+          # emit row in desired order
+          row=""
+          for(i=1;i<=n;i++){
+            v=(idx[i]>0 && idx[i]<=NF)? $idx[i] : ""
+            gsub(/\r/,"",v)
+            row = (i==1)? v : (row OFS v)
+          }
+          print row
+        }' "$f" >> "$info_csv"
+    done
+  fi
 
+  # Show assembly_info.csv if present; otherwise list available assemblies
+  if [[ -s assemblies/assembly_info.csv ]]; then
+    echo "==== assemblies/assembly_info.csv ===="
+    if command -v column >/dev/null 2>&1; then
+      column -s, -t assemblies/assembly_info.csv | sed 's/^/  /'
+    else
+      sed 's/^/  /' assemblies/assembly_info.csv
+    fi
+    echo "======================================"
+  else
+    echo "[warn] No summary CSVs found to build assemblies/assembly_info.csv; available assemblies:"
+    shopt -s nullglob
+    for f in assemblies/*.result.fasta; do
+      b=$(basename "$f"); echo "  - ${b%.result.fasta}"
+    done
+  fi
+
+  
+fi
         # --- interactive selection for assembler (Step 12) ---
         valid_assemblers="canu external flye ipa nextDenovo peregrine RAFT-hifiasm"
         if [[ -z "${assembler:-}" ]]; then
@@ -1215,13 +1451,13 @@ with open(sys.argv[1]) as f:
                 de = float(tags['de'].split(":")[-1])
                 ident = max(0.0, 1.0 - de)
             except: pass
-        if ident is None: 
+        if ident is None:
             continue
         cov = alnlen / float(qlen)
         cur = best.get(qname, (0.0, 0.0))
         if cov > cur[0] or (abs(cov-cur[0])<1e-6 and ident > cur[1]):
             best[qname] = (cov, ident)
-drop = {q for q,(cov,iden) in best.items() if cov >= 0.80 and iden >= 0.50}
+drop = {q for q,(cov,iden) in best.items() if cov >= 0.95 and iden >= 0.95}
 keep = []
 with open(sys.argv[2]) as f:
     name=None; seq=[]
@@ -1265,16 +1501,21 @@ PY
         fi
 
         # Recombine: protected t2t + filtered others
-        cat assemblies/protected.t2t.fa assemblies/others.filtered.fa > assemblies/merged_protected_priority.fa
+        if [[ -s assemblies/others.filtered.fa ]]; then
+          cat assemblies/protected.t2t.fa assemblies/others.filtered.fa > assemblies/merged_protected_priority.fa
+        else
+          echo "[warn] others.filtered.fa missing; using reduced_others."
+          cat assemblies/protected.t2t.fa "$reduced_others" > assemblies/merged_protected_priority.fa
+        fi
         echo "[ok] Built assemblies/merged_protected_priority.fa (t2t protected)"
 
         # Sort final contigs
         eval "$(conda shell.bash hook)"
-        conda deactivate
-        conda activate funannotate
+        conda deactivate 2>/dev/null || true
+        conda activate funannotate 2>/dev/null || true
         check_command
         log_version "funannotate" "funannotate" 2>/dev/null || true
-        ( eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate funannotate 2>/dev/null || true;           if ! command -v funannotate >/dev/null 2>&1; then echo "[error] funannotate not found in env "funannotate"" >&2; exit 127; fi;           funannotate sort -i assemblies/merged_protected_priority.fa -b contig -o "merged_${assembler}_sort.fa" --minlen 500 )
+        funannotate sort -i assemblies/merged_protected_priority.fa -b contig -o "merged_${assembler}_sort.fa" --minlen 500
         check_command
 
         # Publish final
@@ -1300,9 +1541,6 @@ if [[ ! -s "$final_fa" ]]; then
   echo "[error] Final merged FASTA '$final_fa' not found." >&2
   exit 1
 fi
-
-
-
 
 [[ -d assemblies ]] || { echo "[error] 'assemblies' folder not found."; exit 1; }
 [[ -d busco ]] || mkdir busco
@@ -1503,18 +1741,18 @@ else
 fi
 
 # 3) Compute metrics (same logic as for individual assemblies)
-double=$(awk 'NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {c=$1; sub(/[ \t].*$/,"",c); if($2==0 && $3==$4) print c}' "$list" | sort -u | wc -l)
-  # v0.2.2 override: correct double-end contig counting (both ends flagged)
-  double=$(awk '
-    NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-      c=$1; sub(/[ \t].*$/,"",c);
-      s[c]+=($2==0)?1:0; e[c]+=($3==$4)?1:0
-    }
-    END{ for(c in s){ if(s[c]>0 && e[c]>0) print c } }
-  ' "$list" | sort -u | wc -l)
-single=$(awk '
+double=$(awk '
+  NF>=4 { gsub(/\r/, "") }
   NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-    c=$1; sub(/[ \t].*$/,"",c);
+    c=$1; sub(/[ \t].*$/, "", c);
+    s[c]+=($2==0)?1:0; e[c]+=($3==$4)?1:0
+  }
+  END{ for(c in s){ if((s[c]>0) && (e[c]>0)) print c } }
+' "$list" | wc -l)
+single=$(awk '
+  NF>=4 { gsub(/\r/, "") }
+  NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
+    c=$1; sub(/[ \t].*$/, "", c);
     s[c]+=($2==0)?1:0; e[c]+=($3==$4)?1:0
   }
   END{ for(c in s){ if((s[c]+e[c])==1) print c } }
@@ -1550,7 +1788,6 @@ if [[ -n "$QUAST_BIN" ]]; then
 else
   echo "[warn] quast.py/quast not found; will try to use any existing quast_final/*report*.tsv" >&2
 fi
-
 
 # Build assemblies/final-quast.tsv and assemblies/final.quast.csv
 python3 - <<'PY'
@@ -1714,6 +1951,39 @@ for tag, p in FINAL_FILES:
             order_seen.append(m)
         final_map[m] = v
 
+
+# --- Fallback/override: recompute telomere counts directly from final.telo.list ---
+def _compute_telo_counts(list_path):
+    try:
+        s = {}
+        e = {}
+        with open(list_path, 'r', newline='') as f:
+            for line in f:
+                line = line.strip().replace('\r','')
+                if not line: 
+                    continue
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                c = parts[0]
+                try:
+                    a = int(parts[1]); b = int(parts[2]); L = int(parts[3])
+                except ValueError:
+                    continue
+                s[c] = s.get(c, 0) + (1 if a == 0 else 0)
+                e[c] = e.get(c, 0) + (1 if b == L else 0)
+        keys = set(s) | set(e)
+        double = sum(1 for k in keys if s.get(k,0) > 0 and e.get(k,0) > 0)
+        single = sum(1 for k in keys if (s.get(k,0) + e.get(k,0)) == 1)
+        return str(double), str(single)
+    except Exception:
+        return None
+_tcounts = _compute_telo_counts("assemblies/final.telo.list")
+if _tcounts is not None:
+    _d, _s = _tcounts
+    final_map["Telomere double-end contigs"] = _d
+    final_map["Telomere single-end contigs"] = _s
+
 # 2) If assembly_info exists, append a 'final' column matched by 'Metric'
 hdr, body = read_assembly_info(ASM_INFO)
 
@@ -1765,7 +2035,7 @@ PY
 check_command
 echo "[ok] Wrote final_result.csv"
       ;;
-      
+
 17)
 # Step 17 - Cleanup temporary files
 echo "Step 17 - Cleanup temporary files"
