@@ -1,172 +1,141 @@
-# 🧬 TAMP: Telomere Assembly Merge Pipeline (v0.2.1)
+# 🧬 TAMP: Telomere Assembly Merge Pipeline (v0.2.6)
 
-**TAMP (Telomere Assembly Merge Pipeline)** is a modular, automated pipeline for benchmarking, selecting, and merging genome assemblies—optimized for **fungal haploid genomes** and **PacBio HiFi** reads, but broadly applicable to other small eukaryotic genomes.
-
----
-
-## 🚀 What’s new in v0.2.1
-
-- **T2T protection:** contigs from `t2t_clean.fasta` are *never* passed into `redundans`. Redundancy reduction runs only on the “others” set; T2T is re‑added unchanged.
-- **Optional alignment filter:** non‑T2T contigs that are redundant vs. T2T (e.g., `minimap2 -x asm20`, identity ≥ 0.95 and covered fraction ≥ 0.95) are dropped before recombining.
-- **Choice preserved:** interactive prompt or `--choose <assembler>` still selects the non‑T2T assembly to merge with T2T.
-- **Docs/usage refresh:** examples updated to use `TAMP-0.2.1.sh`. Changelog header embedded in the script.
-
-> No other pipeline behavior changes: outputs, dependency management, and step numbering remain consistent with v0.2.
+**TAMP** is a modular, automated pipeline for benchmarking, selecting, and merging genome assemblies. It is optimized for **fungal haploid genomes** and **PacBio HiFi** reads, but is generally applicable to small eukaryotic genomes.
 
 ---
 
-## 📁 Output Layout
+## What TAMP Does (at a glance)
 
-```
-final_results/
-├── final.merged.fasta
-├── assembly_info.csv
-├── assembly_info.md
-└── t2t_clean.fasta
-```
-Other folders:
-- `logs/step_*.log` — detailed per-step logs  
-- `version.txt` — software version tracking (auto-generated)  
-- `assemblies/` — per-assembler outputs
+- **Runs multiple assemblers** (1–6): HiCanu, NextDenovo, Peregrine, IPA, Flye, RAFT-hifiasm.
+- **Normalizes and copies assemblies** (7): consistent contig headers and length-sorted FASTA per assembler.
+- **Telomere discovery & per-assembler telomeric subsets** (8–9): finds telomeric contigs (via `seqtk telo`) and prepares per-assembler telomeric FASTAs.
+- **Quality assessment** (10, 13): QUAST for structure metrics; BUSCO for completeness.
+- **Unified assembly metrics** (12): *before merging*, TAMP **rebuilds** `assemblies/assembly_info.csv` by combining BUSCO/QUAST/TELO CSVs so you can compare candidates in one table.
+- **Final merge with T2T protection** (12):
+  - You choose an assembly interactively or with `--choose`.
+  - T2T contigs from `t2t_clean.fasta` are **always preserved**.
+  - Redundancy reduction (`redundans`) runs **only** on non‑T2T contigs, with an optional `minimap2` filter to drop non‑T2T contigs redundant to T2T.
+  - Contigs are recombined and length‑sorted for the final FASTA.
+- **Telomere QC & final summary** (14–17): telomere counts, telomeric FASTA, and consolidated reports.
+- **Reproducibility**: each run writes tool versions to `version.txt` and step-by-step logs to `logs/`.
 
 ---
 
-## ⚙️ Dependencies
+## Installation & Environments
 
-Set up environments:
 ```bash
 conda env create -f dependency/pacbiohifi.yml
 conda env create -f dependency/busco.yml
 conda env create -f dependency/quast.yml
 ```
-The script activates environments automatically as needed.
+TAMP activates the appropriate environment automatically during steps.
 
 ---
 
-## 🧩 Workflow Summary
+## Quick Start
 
-| Step | Function |
-|------|----------|
-| 1–6  | Run assemblers: HiCanu, NextDenovo, Peregrine, IPA, Flye, RAFT‑Hifiasm |
-| 7    | Copy assemblies, normalize contigs |
-| 8–9  | Telomere detection & preliminary merge |
-| 10   | QUAST quality assessment |
-| 11   | Generate `assembly_info.csv` & `assembly_info.md` |
-| 12   | **Final assembly merge (T2T contigs protected)** |
-| 13   | BUSCO completeness evaluation |
-| 14–17| Telomere QC & final summary |
-
----
-
-## 🔐 Step 12 (v0.2.1): “Protect T2T, reduce others, recombine”
-
-1. **Select the non‑T2T assembly**  
-   - Interactive prompt lists available assemblies in `assemblies/` or pass `--choose <assembler>`.
-
-2. **Merge chosen assembly with T2T (name‑stable)**  
-   - Merge while preserving original T2T contig names (required for name‑based split).
-
-3. **Split by contig origin**  
-   - **Protected:** contigs whose names occur in `t2t_clean.fasta` → `assemblies/protected.t2t.fa`  
-   - **Others:** everything else → `assemblies/others.fa`
-
-4. **Reduce only “others” with redundans**  
-   ```bash
-   redundans.py --noscaffolding --nogapclosing -t <threads> \
-     -f assemblies/others.fa --identity 0.50 --overlap 0.80
-   # → redundans/scaffolds.reduced.fa
-   ```
-
-5. **(Recommended) Drop “others” redundant to T2T via alignment**  
-   ```bash
-   minimap2 -x asm20 -t <threads> protected.t2t.fa redundans/scaffolds.reduced.fa \
-     | <parse-and-keep-only-nonredundant>  # keep others not covering T2T at ≥0.95/0.95
-   # → assemblies/others.filtered.fa
-   ```
-
-6. **Recombine & sort**  
-   ```bash
-   cat assemblies/protected.t2t.fa assemblies/others.filtered.fa > assemblies/merged_protected_priority.fa
-   funannotate sort -i assemblies/merged_protected_priority.fa -b contig -o final_results/final.merged.fasta --minlen 500
-   ```
-
-> If the merger renames contigs, use an alignment‑based split against `t2t_clean.fasta` instead of name matching.
-
----
-
-## 🧾 Version Tracking
-
-Example `version.txt`:
-```
-Pipeline: TAMP-0.2.1.sh
-Run ID:   20251105_104139
-Date:     2025-11-05 10:41:39
-Host:     <hostname>
-
-Software versions:
-canu: v2.3
-nextDenovo: v3.6
-peregrine: v0.5.3
-ipa: v1.3
-flye: v2.9
-hifiasm: v0.19
-busco: v5.7.1
-quast: v5.2.0
-minimap2: 2.28-r1209
-bwa: v0.7.17
-samtools: v1.13
-python3: 3.10.14
-```
-
----
-
-## 🧪 Example Usage
-
-Full pipeline:
+**Full run (HiFi reads):**
 ```bash
-bash TAMP-0.2.1.sh --fastq reads.fastq.gz -g 90m -t 20 -m AACCCT --busco ascomycota_odb10
+bash TAMP-0.2.6.sh --fastq reads.fastq.gz -g 90m -t 20 -m AACCCT --busco ascomycota_odb10
 ```
 
-Continue from Step 7:
+**Resume from Step 7:**
 ```bash
-bash TAMP-0.2.1.sh --fasta genome.fa -g 90m -t 20 -m AACCCT -s 7-17
+bash TAMP-0.2.6.sh --fasta genome.fa -g 90m -t 20 -m AACCCT -s 7-17
 ```
 
-Merge & finalize (Step 12+):
+**Run merge only (Step 12+) with a prebuilt T2T:**
 ```bash
-bash TAMP-0.2.1.sh -g 90m -t 32 --fasta myassembly.fa --busco ascomycota_odb10 -s 12-17
-# Non-interactive choice example:
-bash TAMP-0.2.1.sh -g 90m -t 32 --fasta myassembly.fa -s 12 --choose flye
+bash TAMP-0.2.6.sh -g 90m -t 32 --fasta myassembly.fa -s 12-17
+# Non-interactive choose:
+bash TAMP-0.2.6.sh -g 90m -t 32 --fasta myassembly.fa -s 12 --choose flye
 ```
 
 ---
 
-## 📊 Final Deliverables
+## Pipeline Steps (summary)
 
-| File | Description |
-|------|-------------|
-| `final.merged.fasta` | Final merged genome |
-| `assembly_info.csv`  | Metrics per assembler |
-| `assembly_info.md`   | Summary (Markdown) |
-| `t2t_clean.fasta`    | Telomere-to-telomere cleaned FASTA |
-
----
-
-## 🧯 Troubleshooting
-
-- Logs in `logs/step_<N>.log`
-- Check conda envs if tools show as NOT FOUND
-- BUSCO lineage: verify dataset (e.g., `ascomycota_odb10`) exists
-- If `version.txt` missing entries, rerun within correct environment
+| Step | Purpose |
+|------|--------|
+| 1–6  | Assemble with HiCanu, NextDenovo, Peregrine, IPA, Flye, RAFT‑Hifiasm |
+| 7    | Copy to `assemblies/` and normalize headers (stable, length‑sorted IDs) |
+| 8–9  | Detect telomeres per assembler (`seqtk telo`) and create telomeric subsets |
+| 10   | QUAST metrics (`quast_final/`) |
+| 11   | (If present) Create assembly summaries |
+| 12   | **Rebuild `assemblies/assembly_info.csv` and perform final merge with T2T protection** |
+| 13   | BUSCO completeness |
+| 14–17| Telomere QC, counts, telomeric FASTA, and summary tables |
 
 ---
 
-## 📜 Citation
+## Step 12 Details — Rebuild, Compare, Merge
 
-If you use **TAMP v0.2.1**, please cite:
+1. **Rebuild summary table first**  
+   At the start of Step 12, TAMP **rebuilds** `assemblies/assembly_info.csv` by merging any of these that exist:
+   - `assemblies/assembly.busco.csv` (or common alternates)
+   - `assemblies/assembly.quast.csv`
+   - `assemblies/assembly.telo.csv`  
+   The builder is Python‑based in v0.2.6, so it’s robust to CRLF line endings and awk variants.
 
-> Sun, Y. (2025). *TAMP: Telomere Assembly Merge Pipeline v0.2.1.*  
+2. **Choose an assembly**  
+   - Interactive prompt lists assemblies present in `assemblies/*.result.fasta`, or
+   - `--choose <assembler>` to skip the prompt.
+
+3. **T2T protection and merge**  
+   - **All** contigs from `t2t_clean.fasta` are protected and **kept as‑is**.
+   - The chosen assembly’s non‑T2T contigs are reduced with `redundans` (T2T is never passed into `redundans`).  
+   - (Recommended) `minimap2 -x asm20` can drop non‑T2T contigs that are redundant vs. T2T (e.g., identity ≥ 0.95; covered fraction ≥ 0.95).  
+   - Protected T2T + reduced “others” → recombined and length‑sorted → `assemblies/final.merged.fasta`.
+
+---
+
+## Telomere Metrics: Definitions (used in Steps 9 & 14)
+
+- **Double‑end contig**: a contig with telomeric signal at **both** ends (has at least one hit where `start == 0` and at least one hit where `end == length`).  
+- **Single‑end contig**: telomeric signal at **exactly one** end.
+
+These definitions are enforced in v0.2.2+ to avoid under‑counting double‑ended contigs.
+
+---
+
+## Outputs
+
+- `assemblies/*.result.fasta` — normalized per‑assembler FASTAs  
+- `assemblies/final.merged.fasta` — final assembly  
+- `assemblies/assembly_info.csv` — unified matrix of BUSCO/QUAST/TELO metrics  
+- `quast_final/` — QUAST outputs  
+- `logs/step_<N>.log` — logs per step  
+- `version.txt` — tool versions captured during the run
+
+---
+
+## Troubleshooting
+
+- **No assembler found / empty files**: check paths and that each assembler completed.  
+- **Step 12 table looks empty**: confirm at least one of BUSCO / QUAST / TELO CSVs exists in `assemblies/`.  
+- **Seqtk not found**: ensure the `funannotate` (or appropriate) env is active; TAMP will try to auto‑activate.  
+- **Line‑ending issues**: v0.2.6’s Python builder strips CRs; previous awk errors (e.g., `gsub(/` at Step 12) are resolved.  
+- **T2T contig names changed by a merger**: use the alignment‑based T2T split path to protect T2T contigs by alignment rather than name.
+
+---
+
+## Citation
+
+If you use **TAMP v0.2.6**, please cite:
+
+> Sun, Y. (2025). *TAMP: Telomere Assembly Merge Pipeline v0.2.6.*  
 > Grainger Bioinformatics Center, Field Museum of Natural History.
 
 ---
-Generated on 2025-11-05
+
+## Changelog
+
+- **v0.2.6** — *Step 12 builder hardened*: Replaced awk table builder with **Python‑based** `build_assembly_info_v2` (CRLF‑safe, header‑normalized) and invoked it at the start of Step 12.  
+- **v0.2.5** — *Step 12 robustness*: Made CR removal explicit to avoid awk `/.../` parse errors on some platforms.  
+- **v0.2.4** — *Step 12 flow*: Always rebuild `assemblies/assembly_info.csv` from BUSCO/QUAST/TELO prior to prompting/`--choose`; print the matrix.  
+- **v0.2.3** — *Step 7 bugfix*: Removed stray Bash call embedded in the Python heredoc of `rename_and_sort_fasta` (no more `SyntaxError` in `/tmp/rename_fa*.py`).  
+- **v0.2.2** — *Telomere counts*: Fixed double‑end logic in Steps 9 & 14 to require signal at **both** ends; single‑end unchanged.  
+- **v0.2.1** — *T2T protection*: Step 12 ensures **T2T contigs are preserved**; run `redundans` only on non‑T2T contigs; keep `--choose` and interactive prompt.
+
+---
+Generated on 2025-11-06
