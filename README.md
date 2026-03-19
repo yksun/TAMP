@@ -1,27 +1,14 @@
-<table>
-<tr>
-<td>
+![Latest Version](https://img.shields.io/github/v/tag/yksun/TAMP?label=Latest%20Version)
 
-</td>
-<td align="right">
+[![BioConda Install](https://img.shields.io/conda/dn/bioconda/tamp.svg?style=flag&label=BioConda%20install)](https://anaconda.org/bioconda/tamp)
 
-<img src="docs/tamp-logo.png" width="160"><br><br>
+[![GitHub Clones](https://img.shields.io/badge/dynamic/json?color=success&label=Clones&query=count&url=https://gist.githubusercontent.com/Dfupa/0fc9a42bb90e0b6c38767174bce725db/raw/clone.json&logo=github)](https://github.com/MShawon/github-clone-count-badge)
 
-[![Bioconda Version](https://anaconda.org/bioconda/tamp/badges/version.svg)](https://anaconda.org/bioconda/tamp)  
-[![Bioconda Downloads](https://anaconda.org/bioconda/tamp/badges/downloads.svg)](https://anaconda.org/bioconda/tamp)  
+![Docker Pulls](https://img.shields.io/docker/pulls/yksun/tamp)
 
-<img src="https://img.shields.io/github/v/tag/yksun/TAMP?label=Latest%20Version"><br>
-<img src="https://img.shields.io/github/last-commit/yksun/TAMP"><br>
+[![run with docker](https://img.shields.io/badge/run%20with-docker-0db7ed?labelColor=000000&logo=docker)]()
 
-<br>
-
-<img src="https://img.shields.io/badge/Docker-coming_soon-lightgrey"><br>
-<img src="https://img.shields.io/badge/Singularity-coming_soon-lightgrey">
-
-</td>
-</tr>
-</table>
-
+[![run with singularity](https://img.shields.io/badge/run%20with-singularity-1d355c.svg?labelColor=000000)]()
 
 ---
 
@@ -44,7 +31,7 @@
   - [Citation](#citation)
 
 ---
-
+<img align="right" src="/docs/tamp-icon.png">
 # TAMP  
 **Telomere Assembly Merge Pipeline**
 
