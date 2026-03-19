@@ -1,5 +1,8 @@
-# TAMP
+<p align="center">
+  <img src="docs/tamp-icon.png" alt="TAMP logo" width="220">
+</p>
 
+# TAMP
 **Telomere Assembly Merge Pipeline**
 
 TAMP is a modular workflow for **genome assembly benchmarking, telomere-aware evaluation, and final assembly merging**. It is designed for **PacBio HiFi reads** and is especially useful for **small eukaryotic genomes**, with a strong initial focus on **fungal genomes**. The pipeline runs multiple assemblers, standardizes their outputs, compares their quality, identifies telomeric contigs, and builds a final merged assembly while protecting contigs that appear to be telomere-to-telomere (T2T).
