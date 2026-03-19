@@ -1,14 +1,25 @@
-<p align="right">
-  <img src="docs/tamp-logo.png" width="180"><br>
-  <img src="https://img.shields.io/github/v/tag/yksun/TAMP?label=Latest%20Version">
-  <img src="https://img.shields.io/github/last-commit/yksun/TAMP">
-  <img src="https://img.shields.io/github/issues/yksun/TAMP"><br>
-  <img src="https://img.shields.io/badge/Docker-coming_soon-lightgrey">
-  <img src="https://img.shields.io/badge/Singularity-coming_soon-lightgrey">
-</p>
+<table>
+<tr>
+<td>
 
 # TAMP  
 **Telomere Assembly Merge Pipeline**
+
+</td>
+<td align="center">
+
+<img src="docs/tamp-logo.png" width="160"><br><br>
+
+<img src="https://img.shields.io/github/v/tag/yksun/TAMP?label=Latest%20Version"><br>
+<img src="https://img.shields.io/github/last-commit/yksun/TAMP"><br>
+<img src="https://img.shields.io/github/issues/yksun/TAMP"><br><br>
+
+<img src="https://img.shields.io/badge/Docker-coming_soon-lightgrey"><br>
+<img src="https://img.shields.io/badge/Singularity-coming_soon-lightgrey">
+
+</td>
+</tr>
+</table>
 
 ---
 
@@ -31,9 +42,6 @@
   - [Citation](#citation)
 
 ---
-
-# TAMP
-**Telomere Assembly Merge Pipeline**
 
 TAMP is a modular workflow for **genome assembly benchmarking, telomere-aware evaluation, and final assembly merging**. It is designed for **PacBio HiFi reads** and is especially useful for **small eukaryotic genomes**, with a strong initial focus on **fungal genomes**. The pipeline runs multiple assemblers, standardizes their outputs, compares their quality, identifies telomeric contigs, and builds a final merged assembly while protecting contigs that appear to be telomere-to-telomere (T2T).
 
