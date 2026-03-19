@@ -2,58 +2,6 @@
 if [ -z "$BASH_VERSION" ]; then
   exec /usr/bin/env bash "$0" "$@"
 fi
-# - FIX (Step 12): Pass CLI args to Python heredocs correctly (no post-heredoc args).
-#                  Fixes IndexError and "Permission denied" after merge.
-# - FIX: Robust project name parsing for .fastq.gz.
-# - Tweak: expose PROTECT_COV/PROTECT_ID env vars for redundancy filter (default 0.95/0.95).
-# - FIX (Step 12): Pre-filter 'others' contigs against protected T2T via minimap2
-#                  (drop if best hit has cov>=0.95 & id>=0.95), then run redundans
-#                  ONLY on the non-redundant remainder. Recombine with protected T2T
-#                  (unchanged). Tunable via PROTECT_COV and PROTECT_ID.
-# - Tweak: Correct minor typos in --choose prompt.
-# - FIX (Step 16): Ensure 'final' telomere metrics are computed reliably by recomputing
-#                   from assemblies/final.telo.list during final_result merge, and by
-#                   normalizing whitespace/CRs. Prevents 'Telomere double-end contigs'
-#                   from showing 0 when list indicates >0.
-# - FIX (Step 14): Compute 'Telomere double-end contigs' by aggregating left/right telomeric hits
-#                  per contig (s[c]>0 && e[c]>0), matching Step 9 logic. Also strip CRs before parsing.
-# - FIX (Step 12): Replaced awk-based assembly_info builder with a Python-based
-#   build_assembly_info_v2() that strips CRs, normalizes headers, and merges BUSCO/QUAST/TELO
-#   reliably across awk variants. Called at the start of Step 12.
-# - FIX (Step 12): Make AWK CR stripping portable and robust:
-#     • Use gsub("\\r","",$i) instead of regex literal.
-#     • Pipe each CSV through tr -d '\\r' before AWK.
-#   This eliminates the 'gsub(/' parse error on some AWK builds.
-# - FIX (Step 12): Always rebuild and overwrite assemblies/assembly_info.csv by merging BUSCO/QUAST/TELO CSVs if present;
-#                  corrected awk CR-strip and stabilized header/rows; print matrix before prompt/--choose.
-# - FIX (Step 7): Removed stray Bash inside Python heredoc; log Python version from Bash before invoking the temp script.
-# - FIX (Steps 9 & 14): Telomere double-end contigs counted when both ends have telomeric signal (start==0 and end==len).
-# - Version bump from 0.2 → 0.2.1.
-# - Step 12 note: t2t_clean.fasta contigs are preserved; redundans runs only on non-T2T contigs.
-#   (--choose still supported; interactive prompt retained.)
-# ------------------------------------------------------------
-# v0.2.7 (2025-11-14)
-# - CHANGE (Step 12): Normalize others.fa headers, run redundans with minimap2-based reduction,
-#                     and use corrected others.filtered.fa writer; log contig reduction stats.
-# ------------------------------------------------------------
-# v0.2.6.8 (2025-11-12)
-# - CHANGE (Step 12): Auto-select assembler with highest N50 from assemblies/assembly_info.csv
-#                     when --choose is not provided; explicit --choose still overrides.
-# ------------------------------------------------------------
-# v0.2.6.7 (2025-11-12)
-# - FIX (Step 12): Guard against missing/empty t2t_clean.fasta. If absent,
-#   skip merge_wrapper and pass through the chosen assembler result directly.
-#   Prevents FileNotFoundError at merge_wrapper.py when no T2T contigs exist.
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-# v0.2.6.6 (2025-11-12)
-# - FIX (Step 10): If one or more assemblies are missing, proceed with the
-#   available FASTAs in ./assemblies for the merge. For a single available
-#   assembly, skip pairwise merge and copy it directly to allmerged_telo.fasta.
-#   Continue to generate t2t.fasta and t2t_clean.fasta from what is available.
-#   (Avoids failures when some assemblers are absent.)
-# ------------------------------------------------------------
-# ------------------------------------------------------------
 
 # ===== Version logging helpers =====
 VERSION_FILE="${VERSION_FILE:-version.txt}"
@@ -181,13 +129,98 @@ run_busco=false
 busco_lineage="ascomycota_odb10"
 
 # --- Logging & versioning ---
-PIPELINE_NAME="TAMP-2.6.5.sh"
+PIPELINE_NAME="TAMP-0.30.sh"
 RUN_ID="$(date +'%Y%m%d_%H%M%S')"
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
 
 LOG_AWK='{ print strftime("[%Y-%m-%d %H:%M:%S]"), $0; fflush(); }'
 timestamp() { date +"%Y-%m-%d %H:%M:%S"; }
+
+BENCH_DIR="benchmark_logs"
+BENCH_STEP_TSV="${BENCH_DIR}/step_benchmark.tsv"
+BENCH_RUN_TSV="${BENCH_DIR}/run_metadata.tsv"
+BENCH_SUMMARY_TXT="${BENCH_DIR}/run_summary.txt"
+mkdir -p "$BENCH_DIR"
+
+write_run_metadata() {
+  mkdir -p "$BENCH_DIR"
+  {
+    echo -e "field	value"
+    echo -e "pipeline	${PIPELINE_NAME}"
+    echo -e "run_id	${RUN_ID}"
+    echo -e "date	$(timestamp)"
+    echo -e "host	$(hostname 2>/dev/null || echo unknown)"
+    echo -e "working_directory	$(pwd)"
+    echo -e "conda_env	${CONDA_DEFAULT_ENV:-NA}"
+    echo -e "python	$(command -v python3 2>/dev/null || echo NA)"
+    echo -e "threads	${threads:-NA}"
+    echo -e "genome_size	${genomesize:-NA}"
+    echo -e "fastq	${fastq:-NA}"
+    echo -e "motif	${motif:-NA}"
+    echo -e "steps	${steps[*]:-all}"
+    echo -e "os	$(uname -srvmo 2>/dev/null || uname -a 2>/dev/null || echo NA)"
+    echo -e "cpu_count	$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo NA)"
+    echo -e "memory_kb	$(awk '/MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo NA)"
+  } > "$BENCH_RUN_TSV"
+}
+
+init_benchmark_step_table() {
+  mkdir -p "$BENCH_DIR"
+  if [[ ! -f "$BENCH_STEP_TSV" ]]; then
+    echo -e "run_id	step	step_name	start_time	end_time	runtime_sec	status	log_file" > "$BENCH_STEP_TSV"
+  fi
+}
+
+step_name() {
+  case "$1" in
+    1) echo "HiCanu assembly" ;;
+    2) echo "NextDenovo assembly" ;;
+    3) echo "Peregrine assembly" ;;
+    4) echo "IPA assembly" ;;
+    5) echo "Flye assembly" ;;
+    6) echo "RAFT-hifiasm assembly" ;;
+    7) echo "Copy all assemblies" ;;
+    8) echo "BUSCO for assemblies" ;;
+    9) echo "Telomere contigs and metrics" ;;
+    10) echo "Merge all assemblies" ;;
+    11) echo "QUAST for assemblies" ;;
+    12) echo "Final merge using selected assembler" ;;
+    13) echo "BUSCO final" ;;
+    14) echo "Telomere analysis final" ;;
+    15) echo "QUAST final" ;;
+    16) echo "Generate final comparison report" ;;
+    17) echo "Cleanup temporary files" ;;
+    *) echo "Unknown step" ;;
+  esac
+}
+
+append_step_benchmark() {
+  local step="$1"
+  local start_epoch="$2"
+  local end_epoch="$3"
+  local status="$4"
+  local log_file="$5"
+  local sname
+  sname="$(step_name "$step")"
+  printf '%s	%s	%s	%s	%s	%s	%s	%s
+'     "$RUN_ID"     "$step"     "$sname"     "$(date -d "@$start_epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r "$start_epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$start_epoch")"     "$(date -d "@$end_epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date -r "$end_epoch" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "$end_epoch")"     "$((end_epoch-start_epoch))"     "$status"     "$log_file" >> "$BENCH_STEP_TSV"
+}
+
+write_benchmark_summary() {
+  mkdir -p "$BENCH_DIR"
+  {
+    echo "Pipeline: ${PIPELINE_NAME}"
+    echo "Run ID: ${RUN_ID}"
+    echo "Date: $(timestamp)"
+    echo "Benchmark table: ${BENCH_STEP_TSV}"
+    echo "Run metadata: ${BENCH_RUN_TSV}"
+    echo
+    if [[ -f "$BENCH_STEP_TSV" ]]; then
+      awk -F'	' 'NR==1{next} {c[$7]++} END{for(k in c) print k ": " c[k] " step(s)"}' "$BENCH_STEP_TSV"
+    fi
+  } > "$BENCH_SUMMARY_TXT"
+}
 
 write_versions() {
   local vf="version.txt"
@@ -375,6 +408,7 @@ if [[ -z "$genomesize" || -z "$threads" || -z "$fastq" || -z "$motif" ]]; then
 fi
 
 write_versions
+check_single_env_requirements
 
 # Resolve external FASTA if provided
 if [[ -n "$external_fasta" ]]; then
@@ -448,10 +482,75 @@ check_command() {
   fi
 }
 
-echo "Activating assembly environment"
-eval "$(conda shell.bash hook)"
-conda activate pacbiohifi
-check_command
+require_cmd() {
+  local cmd="$1"
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "[error] Required command not found in the active conda environment: $cmd" >&2
+    exit 127
+  fi
+}
+
+t2t_list_inline() {
+  local seqtk_file=""
+  local output="t2t.list"
+  OPTIND=1
+  while getopts ":i:o:" opt; do
+    case "$opt" in
+      i) seqtk_file="$OPTARG" ;;&
+      o) output="$OPTARG" ;;&
+      *) echo "Usage: t2t_list_inline -i <seqtk_telo_result> [-o <output_list>]" >&2; return 1 ;;&
+    esac
+  done
+  shift $((OPTIND-1))
+
+  if [[ -z "$seqtk_file" ]]; then
+    echo "[error] t2t_list_inline: seqtk telo result file (-i) is required." >&2
+    return 1
+  fi
+  if [[ ! -s "$seqtk_file" ]]; then
+    : > "$output"
+    echo "[warn] t2t_list_inline: input '$seqtk_file' missing or empty; wrote empty $output" >&2
+    return 0
+  fi
+
+  awk '
+    NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
+      c=$1; sub(/[ \t].*$/, "", c)
+      if ($2 == 0) s[c]=1
+      if ($3 == $4) e[c]=1
+    }
+    END {
+      for (c in s) if (s[c] && e[c]) print c
+      for (c in e) if (s[c] && e[c] && !seen[c]) seen[c]=1
+    }
+  ' "$seqtk_file" | sort -u > "$output"
+
+  echo "List of matching contigs written to $output."
+}
+
+check_single_env_requirements() {
+  local cmds=(python3 canu nextDenovo pg_asm ipa flye hifiasm seqtk busco minimap2 bwa samtools funannotate redundans.py merge_wrapper.py)
+  local missing=()
+  for cmd in "${cmds[@]}"; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+  if ! command -v quast.py >/dev/null 2>&1 && ! command -v quast >/dev/null 2>&1; then
+    missing+=("quast.py/quast")
+  fi
+  if ! command -v raft >/dev/null 2>&1; then
+    echo "[warn] 'raft' is not on PATH. Step 6 will fail unless RAFT is installed into this same environment." >&2
+  fi
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "[error] Missing tools in the active conda environment: ${missing[*]}" >&2
+    echo "[error] Create and activate the unified TAMP environment first, then rerun the pipeline." >&2
+    exit 127
+  fi
+}
+
+echo "[info] Using the current active conda environment (single-env mode)."
+write_versions
+write_run_metadata
+init_benchmark_step_table
 
 if [ ${#steps[@]} -eq 0 ]; then
   steps=(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17)
@@ -459,6 +558,7 @@ fi
 
 for step in "${steps[@]}"; do
   STEP_LOG="${LOG_DIR}/step_${step}.log"
+  step_started_epoch=$(date +%s)
   {
     echo "===== [$(timestamp)] STEP ${step} START ====="
     case $step in
@@ -475,6 +575,7 @@ for step in "${steps[@]}"; do
       check_command
       ;;
     3)
+      log_version "pg_asm" "pg_asm"
       echo "Step 3 - Assembly of the genome using Peregrine"
       pg_asm reads_${project}.lst peregrine-2021
       check_command
@@ -502,10 +603,12 @@ for step in "${steps[@]}"; do
       hifiasm -o getOverlaps -t$threads --dbg-ovec errorcorrect.ec.fa 2> getOverlaps.log
       check_command
       cat getOverlaps.0.ovlp.paf getOverlaps.1.ovlp.paf > overlaps.paf
-      ~/opt/RAFT/raft -e ${COVERAGE} -o fragmented errorcorrect.ec.fa overlaps.paf
+      raft -e ${COVERAGE} -o fragmented errorcorrect.ec.fa overlaps.paf
+      check_command
       hifiasm -o finalasm -t$threads -r1 fragmented.reads.fasta 2> finalasm.log
       check_command
       awk '/^S/{print ">"$2;print $3}' finalasm.bp.hap1.p_ctg.gfa > RAFT-hifiasm.fasta
+      check_command
       cd ..
       ;;
     7)
@@ -541,7 +644,6 @@ for step in "${steps[@]}"; do
       ;;
     8)
       echo "Step 8 - Run BUSCO on all assembled genomes (including external)"
-      eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate busco || true
 
       shopt -s nullglob
       a=(assemblies/*.result.fasta)
@@ -824,7 +926,6 @@ PY
             }' "$f" > "assemblies/${base}.telo.fasta"
           [[ -s "assemblies/${base}.telo.fasta" ]] || rm -f "assemblies/${base}.telo.fasta"
           if [[ -s "assemblies/${base}.telo.fasta" ]]; then
-            eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate pacbiohifi || true
             seqtk telo -s 1 -m "$motif" "assemblies/${base}.telo.fasta" > "assemblies/${base}.telo.list" || true
           fi
         done
@@ -849,6 +950,7 @@ else
       file2="${fasta_files[j]}"
       base1=$(basename "$file1" .telo.fasta)
       base2=$(basename "$file2" .telo.fasta)
+      require_cmd merge_wrapper.py
       log_version "merge_wrapper.py" "merge_wrapper.py"
       merge_wrapper.py -l 1000000 "$file1" "$file2" --prefix merged_"$base1"_"$base2"
       check_command
@@ -863,21 +965,36 @@ else
     cat "${merged_list[@]}" > allmerged_telo.fasta
   fi
 fi
-      eval "$(conda shell.bash hook)"
-      conda deactivate
-      conda activate funannotate
-      ( eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate funannotate 2>/dev/null || true; if ! command -v funannotate >/dev/null 2>&1; then echo "[error] funannotate not found in env \"funannotate\"" >&2; exit 127; fi; funannotate sort -i allmerged_telo.fasta -b contig -o allmerged_telo_sort.fasta --minlen 500 )
-      eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate pacbiohifi || true
+      require_cmd funannotate
+      funannotate sort -i allmerged_telo.fasta -b contig -o allmerged_telo_sort.fasta --minlen 500
+      require_cmd seqtk
       seqtk telo -s 1 -m "$motif" allmerged_telo_sort.fasta > allmerged.telo.list
-      bash ./t2t_list.sh -i allmerged.telo.list -o t2t.list
-      ~/opt/scripts/faSomeRecords allmerged_telo_sort.fasta t2t.list t2t.fasta
-      eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate funannotate || true
-      ( eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate funannotate 2>/dev/null || true; if ! command -v funannotate >/dev/null 2>&1; then echo "[error] funannotate not found in env \"funannotate\"" >&2; exit 127; fi; funannotate clean -i  t2t.fasta -p 30 -o  t2t_clean.fasta --exhaustive )
+      t2t_list_inline -i allmerged.telo.list -o t2t.list
+
+# Extract selected contigs without faSomeRecords
+[[ -s t2t.list ]] || { echo "[warn] empty t2t.list"; touch t2t.fasta; }
+awk '
+BEGIN{
+  while((getline < "t2t.list") > 0){
+    gsub(/\r/,"")
+    keep[$1]=1
+  }
+}
+/^>/{
+  name=$0
+  sub(/^>/,"",name)
+  split(name, a, /[ \t]/)
+  id=a[1]
+  print_flag = (id in keep)
+}
+print_flag
+' allmerged_telo_sort.fasta > t2t.fasta
+      require_cmd funannotate
+      funannotate clean -i  t2t.fasta -p 30 -o  t2t_clean.fasta --exhaustive
       check_command
       ;;
     11)
       echo "Step 11 - QUAST metrics for all assemblies"
-      eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate pacbiohifi || true
 
       shopt -s nullglob
       a=(assemblies/*.result.fasta)
@@ -1281,10 +1398,6 @@ PY
       if [[ -s assemblies/others.clean.fa ]]; then
         mv assemblies/others.clean.fa assemblies/others.fa
       fi
-
-      eval "$(conda shell.bash hook)"
-      conda deactivate 2>/dev/null || true
-      conda activate redundans 2>/dev/null || true
       log_version "redundans.py" "redundans.py" 2>/dev/null || true
 
       orig_count=$(grep -c '^>' assemblies/others.fa 2>/dev/null || echo 0)
@@ -1334,10 +1447,6 @@ PY
         echo "[error] No 'others' contigs available for downstream filtering (expected assemblies/others.fa or redundans/scaffolds.reduced.fa)." >&2
         exit 1
       fi
-
-      eval "$(conda shell.bash hook)"
-      conda deactivate
-      conda activate pacbiohifi 2>/dev/null || true
       if command -v minimap2 >/dev/null 2>&1; then
         log_version "minimap2" "minimap2" 2>/dev/null || true
         paf="assemblies/others_vs_t2t.paf"
@@ -1435,11 +1544,8 @@ PY
         cat assemblies/protected.t2t.fa "$reduced_others" > assemblies/merged_protected_priority.fa
       fi
       echo "[ok] Built assemblies/merged_protected_priority.fa (t2t protected)"
-
-      eval "$(conda shell.bash hook)"
-      conda deactivate 2>/dev/null || true
-      conda activate funannotate 2>/dev/null || true
       check_command
+      require_cmd funannotate
       log_version "funannotate" "funannotate" 2>/dev/null || true
       funannotate sort -i assemblies/merged_protected_priority.fa -b contig -o "merged_${assembler}_sort.fa" --minlen 500
       check_command
@@ -1450,7 +1556,6 @@ PY
       ;;
     13)
       echo "Step 13 - BUSCO analysis"
-      eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate busco || true
 
       threads=${threads:-8}
       lineage=${busco_lineage:-"ascomycota_odb10"}
@@ -1612,7 +1717,6 @@ PY
       ;;
     14)
       echo "Step 14 - Telomere analysis (final assembly)"
-      eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate funannotate 2>/dev/null || true
 
       [[ -d assemblies ]] || { echo "[error] 'assemblies' folder not found."; exit 1; }
       final_fa="assemblies/final.merged.fasta"
@@ -1621,7 +1725,7 @@ PY
         exit 1
       fi
       if ! command -v seqtk >/dev/null 2>&1; then
-        echo "[error] seqtk not found in env 'funannotate'." >&2
+        echo "[error] seqtk not found in the active conda environment." >&2
         exit 127
       fi
 
@@ -1668,7 +1772,6 @@ PY
       ;;
     15)
       echo "Step 15 - QUAST metrics for final assembly"
-      eval "$(conda shell.bash hook)"; conda deactivate 2>/dev/null || true; conda activate pacbiohifi || true
 
       final_fa="assemblies/final.merged.fasta"
       if [[ ! -s "$final_fa" ]]; then
@@ -1933,4 +2036,13 @@ PY
     esac
     echo "===== [$(timestamp)] STEP ${step} END ====="
   } 2>&1 | awk "$LOG_AWK" | tee -a "$STEP_LOG"
+  step_status=${PIPESTATUS[0]}
+  step_finished_epoch=$(date +%s)
+  append_step_benchmark "$step" "$step_started_epoch" "$step_finished_epoch" "$step_status" "$STEP_LOG"
+  if [[ "$step_status" -ne 0 ]]; then
+    echo "[error] Step ${step} failed. See ${STEP_LOG}" >&2
+    write_benchmark_summary
+    exit "$step_status"
+  fi
 done
+write_benchmark_summary
