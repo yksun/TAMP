@@ -1,6 +1,43 @@
 <p align="center">
-  <img src="docs/tamp-icon.png" alt="TAMP logo" width="220">
+  <img src="docs/tamp-logo.png" width="220">
 </p>
+
+<h1 align="center">TAMP</h1>
+<p align="center"><b>Telomere Assembly Merge Pipeline</b></p>
+
+<p align="center">
+  <img src="https://img.shields.io/github/v/tag/yksun/TAMP?label=Latest%20Version">
+  <img src="https://img.shields.io/github/last-commit/yksun/TAMP">
+  <img src="https://img.shields.io/github/issues/yksun/TAMP">
+</p>
+
+<p align="center">
+  <!-- Future placeholders -->
+  <img src="https://img.shields.io/badge/Docker-coming_soon-lightgrey">
+  <img src="https://img.shields.io/badge/Singularity-coming_soon-lightgrey">
+</p>
+
+---
+
+## 📑 Table of Contents
+
+- **[TAMP](#tamp)**  
+  - **[Overview](#overview)**  
+  - **[Installation](#installation)**  
+    - **[Conda / Micromamba](#conda--micromamba)**  
+    - **[Manual installation](#manual-installation)**  
+    - **[Docker (coming soon)](#docker-coming-soon)**  
+    - **[Singularity (coming soon)](#singularity-coming-soon)**  
+  - **[Running the pipeline](#running-the-pipeline)**  
+    - **[Parameters](#parameters)**  
+    - **[Example run](#example-run)**  
+  - **[Output](#output)**  
+  - **[Benchmarking](#benchmarking)**  
+  - **[Dependencies](#dependencies)**  
+  - **[Support](#support)**  
+  - **[Citation](#citation)**  
+
+---
 
 # TAMP
 **Telomere Assembly Merge Pipeline**
