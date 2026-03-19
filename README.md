@@ -140,35 +140,6 @@ Example:
 - `TTAGGG` is suitable for *Neurospora crassa*
 - other fungi may require a different repeat
 
-## Reproducibility and manuscript use
-
-TAMP is structured to support reproducible benchmarking.
-
-For a PeerJ paper, it is helpful to provide:
-
-- the exact `TAMP.sh` script used for the analysis
-- the exact `install_tamp.sh` and `tamp-env.yml` files used for installation
-- the benchmark output files from `benchmark_logs/`
-- the raw or public input data accession numbers
-- an archived repository release with a DOI
-
-PeerJ states that code and raw data are almost always required, that files should be machine-readable, and that repository snapshots with a DOI are preferred for reproducibility. citeturn746666search0turn746666search3
-
-For a methods or software paper, you should also report the source of third-party datasets, the preprocessing steps, the computing environment, and the evaluation metrics used in benchmarking. citeturn746666search4turn746666search0
-
-## Recommended repository layout
-
-```text
-TAMP/
-├── TAMP.sh
-├── install_tamp.sh
-├── tamp-env.yml
-├── README.md
-├── logs/
-├── benchmark_logs/
-└── assemblies/
-```
-
 ## Citation and archiving
 
 If you publish results generated with TAMP, archive the exact release used for the analysis in Zenodo or another DOI-minting repository. Then cite that archived release in the manuscript.
