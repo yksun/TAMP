@@ -1,0 +1,43 @@
+name: tamp
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  # core
+  - python=3.10
+
+  # assemblers
+  - canu
+  - nextdenovo
+  - peregrine-2021
+  - pbipa
+  - flye
+  - hifiasm
+
+  # alignment / core
+  - minimap2
+  - bwa
+  - samtools
+  - seqtk
+  - miniasm
+
+  # evaluation
+  - busco
+  - quast
+
+  # misc tools used in pipeline
+  - funannotate
+  - quickmerge
+
+  # utilities
+  - pigz
+  - curl
+  - wget
+  - git
+  - make
+  - gxx_linux-64
+  - parallel
+
+  # python stability
+  - numpy
+  - pandas
