@@ -1,144 +1,180 @@
-# 🧬 TAMP: Telomere Assembly Merge Pipeline (v0.2.7)
+# TAMP
 
-**TAMP** is a modular, automated pipeline for benchmarking, selecting, and merging genome assemblies. It is optimized for **fungal haploid genomes** and **PacBio HiFi** reads, but is generally applicable to small eukaryotic genomes.
+**Telomere Assembly Merge Pipeline**
 
----
+TAMP is a modular workflow for benchmarking, selecting, and merging genome assemblies. It is built for fungal haploid genomes and PacBio HiFi reads, and it can also be used for other small eukaryotic genomes.
 
-## What TAMP Does (at a glance)
+This README uses **generic file names** for the main pipeline and install files:
 
-- **Runs multiple assemblers** (1–6): HiCanu, NextDenovo, Peregrine, IPA, Flye, RAFT-hifiasm.
-- **Normalizes and copies assemblies** (7): consistent contig headers and length-sorted FASTA per assembler.
-- **Telomere discovery & per-assembler telomeric subsets** (8–9): finds telomeric contigs (via `seqtk telo`) and prepares per-assembler telomeric FASTAs.
-- **Quality assessment** (10, 13): QUAST for structure metrics; BUSCO for completeness.
-- **Unified assembly metrics** (12): *before merging*, TAMP **rebuilds** `assemblies/assembly_info.csv` by combining BUSCO/QUAST/TELO CSVs so you can compare candidates in one table.
-- **Final merge with T2T protection** (12):
-  - You choose an assembly interactively or with `--choose`.
-  - T2T contigs from `t2t_clean.fasta` are **always preserved**.
-  - Redundancy reduction (`redundans`) runs **only** on non‑T2T contigs, with an optional `minimap2` filter to drop non‑T2T contigs redundant to T2T.
-  - Contigs are recombined and length‑sorted for the final FASTA.
-- **Telomere QC & final summary** (14–17): telomere counts, telomeric FASTA, and consolidated reports.
-- **Reproducibility**: each run writes tool versions to `version.txt` and step-by-step logs to `logs/`.
+- `TAMP.sh`
+- `install_tamp.sh`
+- `tamp-env.yml`
 
----
+It does **not** tie the commands in this README to a specific versioned script name.
 
-## Installation & Environments
+## Main features
+
+TAMP can:
+
+- run multiple assemblers: HiCanu, NextDenovo, Peregrine, IPA, Flye, and RAFT-hifiasm
+- standardize assembly FASTA files
+- detect telomeric contigs
+- evaluate assemblies with QUAST and BUSCO
+- build a combined metrics table for assembly comparison
+- protect telomere-to-telomere contigs during final merging
+- write benchmark logs for reproducibility and paper-ready reporting
+
+## Requirements
+
+TAMP is intended for Linux systems. The workflow expects the tools in the conda environment to be available on `PATH`.
+
+## Installation
+
+Create the environment and install TAMP with the generic installer name:
 
 ```bash
-conda env create -f dependency/pacbiohifi.yml
-conda env create -f dependency/busco.yml
-conda env create -f dependency/quast.yml
+bash install_tamp.sh tamp tamp-env.yml
+conda activate tamp
 ```
-TAMP activates the appropriate environment automatically during steps.
 
----
+If you use `micromamba` or `mamba`, keep the same file names and workflow, but use the solver available on your system.
 
-## Quick Start
+## Input data
 
-**Full run (HiFi reads):**
+TAMP uses long-read sequencing data as input.
+
+Required input:
+
+- PacBio HiFi FASTQ file
+- genome size estimate
+- telomere motif for the target species
+
+Optional input:
+
+- pre-assembled FASTA file
+- BUSCO lineage
+- selected pipeline steps
+- explicit assembler choice for final merge
+
+## Basic usage
+
+Run the pipeline with:
+
 ```bash
-bash TAMP-0.2.7.sh --fastq reads.fastq.gz -g 90m -t 20 -m AACCCT --busco ascomycota_odb10
+bash TAMP.sh -g 40m -t 16 --fastq reads.fastq.gz -m TTAGGG
 ```
 
-**Resume from Step 7:**
+Run only selected steps:
+
 ```bash
-bash TAMP-0.2.7.sh --fasta genome.fa -g 90m -t 20 -m AACCCT -s 7-17
+bash TAMP.sh -g 40m -t 16 --fastq reads.fastq.gz -m TTAGGG -s 1,3-5
 ```
 
-**Run merge only (Step 12+) with a prebuilt T2T:**
+Run with BUSCO and interactive final assembler choice:
+
 ```bash
-bash TAMP-0.2.7.sh -g 90m -t 32 --fasta myassembly.fa -s 12-17
-# Non-interactive choose:
-bash TAMP-0.2.7.sh -g 90m -t 32 --fasta myassembly.fa -s 12 --choose flye
+bash TAMP.sh -g 40m -t 16 --fastq reads.fastq.gz -m TTAGGG --busco fungi_odb10 --choose
 ```
 
----
+## Command-line options
 
-## Pipeline Steps (summary)
+```text
+-g, --genomesize   Genome size, for example 40m or 2g
+-t, --threads      Number of CPU threads
+--fastq            Input FASTQ file
+-m, --motif        Telomere motif for the target species
+-s, --steps        Steps to run, for example 1,3-5
+--fasta            External pre-assembled FASTA file or URL
+--busco            Run BUSCO; optional lineage can be given
+--choose           Choose the final assembler interactively
+```
 
-| Step | Purpose |
-|------|--------|
-| 1–6  | Assemble with HiCanu, NextDenovo, Peregrine, IPA, Flye, RAFT‑Hifiasm |
-| 7    | Copy to `assemblies/` and normalize headers (stable, length‑sorted IDs) |
-| 8–9  | Detect telomeres per assembler (`seqtk telo`) and create telomeric subsets |
-| 10   | QUAST metrics (`quast_final/`) |
-| 11   | (If present) Create assembly summaries |
-| 12   | **Rebuild `assemblies/assembly_info.csv` and perform final merge with T2T protection** |
-| 13   | BUSCO completeness |
-| 14–17| Telomere QC, counts, telomeric FASTA, and summary tables |
+## Pipeline steps
 
----
+1. HiCanu assembly  
+2. NextDenovo assembly  
+3. Peregrine assembly  
+4. IPA assembly  
+5. Flye assembly  
+6. Hifiasm assembly  
+7. Copy and standardize assemblies  
+8. BUSCO on assemblies  
+9. Telomere contig detection and telomere metrics  
+10. Merge all assemblies  
+11. QUAST on assembler results  
+12. Final merge using the selected assembler  
+13. BUSCO on final assembly  
+14. Telomere analysis on final assembly  
+15. QUAST on final assembly  
+16. Final comparison report  
+17. Cleanup and file organization  
 
-## Step 12 Details — Rebuild, Compare, Merge
+## Output files
 
-1. **Rebuild summary table first**  
-   At the start of Step 12, TAMP **rebuilds** `assemblies/assembly_info.csv` by merging any of these that exist:
-   - `assemblies/assembly.busco.csv` (or common alternates)
-   - `assemblies/assembly.quast.csv`
-   - `assemblies/assembly.telo.csv`  
-   The builder is Python‑based in v0.2.7+, so it’s robust to CRLF line endings and awk variants.
+Main outputs include:
 
-2. **Choose an assembly**  
-   - By default (v0.2.7), Step 12 **auto-selects** the assembler with the highest N50 in `assemblies/assembly_info.csv`.
-   - You can override this with `--choose <assembler>`.
-   - If auto-selection cannot decide (e.g., missing N50 row), an interactive prompt lists assemblies present in `assemblies/*.result.fasta`.
+- `assemblies/` for assembly FASTA files and summary tables
+- `logs/` for per-step logs
+- `benchmark_logs/` for benchmarking and reproducibility logs
+- `version.txt` for software versions
+- final assembly FASTA files and telomere summary files
 
-3. **T2T protection and merge**  
-   - **All** contigs from `t2t_clean.fasta` are protected and **kept as‑is**.
-   - The chosen assembly’s non‑T2T contigs are reduced with `redundans` (T2T is never passed into `redundans`).  
-   - (Recommended) `minimap2 -x asm20` can drop non‑T2T contigs that are redundant vs. T2T (e.g., identity ≥ 0.95; covered fraction ≥ 0.95).  
-   - Protected T2T + reduced “others” → recombined and length‑sorted → `assemblies/final.merged.fasta`.
+## Benchmark logging
 
----
+TAMP writes machine-readable benchmark files that can be used for internal testing and manuscript preparation.
 
-## Telomere Metrics: Definitions (used in Steps 9 & 14)
+Expected benchmark outputs include:
 
-- **Double‑end contig**: a contig with telomeric signal at **both** ends (has at least one hit where `start == 0` and at least one hit where `end == length`).  
-- **Single‑end contig**: telomeric signal at **exactly one** end.
+- `benchmark_logs/run_metadata.tsv`
+- `benchmark_logs/step_benchmark.tsv`
+- `benchmark_logs/run_summary.txt`
 
-These definitions are enforced in v0.2.2+ to avoid under‑counting double‑ended contigs.
+These files record runtime information, step status, and run metadata.
 
----
+## Telomere motif note
 
-## Outputs
+The telomere motif must match the species being assembled. Do not assume one motif works for all fungi.
 
-- `assemblies/*.result.fasta` — normalized per‑assembler FASTAs  
-- `assemblies/final.merged.fasta` — final assembly  
-- `assemblies/assembly_info.csv` — unified matrix of BUSCO/QUAST/TELO metrics  
-- `assemblies/merged.telo.csv` — final telomere metrics table  
-- `assemblies/merged.busco.csv` — final BUSCO metrics table  
-- `assemblies/merged.quast.csv` — final QUAST metrics table  
-- `merged_result.csv` — consolidated comparison of assemblies (from Step 16)  
-- `quast_final/` — QUAST outputs  
-- `logs/step_<N>.log` — logs per step  
-- `version.txt` — tool versions captured during the run
+Example:
 
----
+- `TTAGGG` is suitable for *Neurospora crassa*
+- other fungi may require a different repeat
 
-## Troubleshooting
+## Reproducibility and manuscript use
 
-- **No assembler found / empty files**: check paths and that each assembler completed.  
-- **Step 12 table looks empty**: confirm at least one of BUSCO / QUAST / TELO CSVs exists in `assemblies/`.  
-- **Seqtk not found**: ensure the `funannotate` (or appropriate) env is active; TAMP will try to auto‑activate.  
-- **Line‑ending issues**: v0.2.7+ Python builder strips CRs; previous awk errors (e.g., `gsub(/` at Step 12) are resolved.  
-- **T2T contig names changed by a merger**: use the alignment‑based T2T split path to protect T2T contigs by alignment rather than name.
+TAMP is structured to support reproducible benchmarking.
 
----
+For a PeerJ paper, it is helpful to provide:
 
-## Citation
+- the exact `TAMP.sh` script used for the analysis
+- the exact `install_tamp.sh` and `tamp-env.yml` files used for installation
+- the benchmark output files from `benchmark_logs/`
+- the raw or public input data accession numbers
+- an archived repository release with a DOI
 
-If you use **TAMP v0.2.7**, please cite:
+PeerJ states that code and raw data are almost always required, that files should be machine-readable, and that repository snapshots with a DOI are preferred for reproducibility. citeturn746666search0turn746666search3
 
-> Sun, Y. (2025). *TAMP: Telomere Assembly Merge Pipeline v0.2.7.*  
-> Grainger Bioinformatics Center, Field Museum of Natural History.
+For a methods or software paper, you should also report the source of third-party datasets, the preprocessing steps, the computing environment, and the evaluation metrics used in benchmarking. citeturn746666search4turn746666search0
 
----
+## Recommended repository layout
 
-## Changelog
+```text
+TAMP/
+├── TAMP.sh
+├── install_tamp.sh
+├── tamp-env.yml
+├── README.md
+├── logs/
+├── benchmark_logs/
+└── assemblies/
+```
 
-- **v0.2.7** — *Final merge & summaries*: Auto-selects the assembler with the highest N50 in Step 12 (unless `--choose` is given); runs `redundans` with minimap2-based reduction on non‑T2T contigs; writes telomere/BUSCO/QUAST summary tables as `assemblies/merged.*.csv` and a consolidated `merged_result.csv`.
-- **v0.2.6** — *Step 12 builder hardened*: Replaced awk table builder with **Python‑based** `build_assembly_info_v2` (CRLF‑safe, header‑normalized) and invoked it at the start of Step 12.  
-- **v0.2.5** — *Step 12 robustness*: Made CR removal explicit to avoid awk `/.../` parse errors on some platforms.  
-- **v0.2.4** — *Step 12 flow*: Always rebuild `assemblies/assembly_info.csv` from BUSCO/QUAST/TELO prior to prompting/`--choose`; print the matrix.  
-- **v0.2.3** — *Step 7 bugfix*: Removed stray Bash call embedded in the Python heredoc of `rename_and_sort_fasta` (no more `SyntaxError` in `/tmp/rename_fa*.py`).  
-- **v0.2.2** — *Telomere counts*: Fixed double‑end logic in Steps 9 & 14 to require signal at **both** ends; single‑end unchanged.  
-- **v0.2.1** — *T2T protection*: Step 12 ensures **T2T contigs are preserved**; run `redundans` only on non‑T2T contigs; keep `--choose` and interactive prompt.
+## Citation and archiving
+
+If you publish results generated with TAMP, archive the exact release used for the analysis in Zenodo or another DOI-minting repository. Then cite that archived release in the manuscript.
+
+## Notes
+
+- Keep helper scripts integrated into `TAMP.sh` when possible.
+- Keep tool names on `PATH` through one activated conda environment.
+- Keep benchmark files with the final results so the run can be checked later.
