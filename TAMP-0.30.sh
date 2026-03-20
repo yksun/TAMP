@@ -467,8 +467,10 @@ minimap2_options_cns = -t ${threads}
 nextgraph_options = -a 1
 EOT
 
-echo $PWD/${fastq} > input_${project}.fofn
-echo $PWD/${fastq} > reads_${project}.lst
+fastq=$(realpath "$fastq")
+
+echo "$fastq" > input_${project}.fofn
+echo "$fastq" > reads_${project}.lst
 
 check_command() {
   if [ $? -ne 0 ]; then
