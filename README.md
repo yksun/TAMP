@@ -136,15 +136,14 @@ If `canu -version` reports a development build such as `master +XX changes`, do 
 
 ```bash
 cd ~/opt
-git clone https://github.com/marbl/canu.git
-cd canu/src
-make -j 16
+curl -LRO https://github.com/marbl/canu/releases/download/v2.3/canu-2.3.Linux-amd64.tar.xz
+tar -xJf canu-2.3.*.tar.xz
 ```
 
 Then expose the stable binary:
 
 ```bash
-export PATH="$HOME/opt/canu/build/bin:$PATH"
+export PATH="$HOME/opt/canu-2.3/build/bin:$PATH"
 ```
 
 <a id="usage"></a>
