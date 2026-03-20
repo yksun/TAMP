@@ -129,7 +129,7 @@ run_busco=false
 busco_lineage="ascomycota_odb10"
 
 # --- Logging & versioning ---
-PIPELINE_NAME="TAMP-0.30.sh"
+PIPELINE_NAME="TAMP-0.3.1.sh"
 RUN_ID="$(date +'%Y%m%d_%H%M%S')"
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
@@ -179,7 +179,7 @@ step_name() {
     3) echo "Peregrine assembly" ;;
     4) echo "IPA assembly" ;;
     5) echo "Flye assembly" ;;
-    6) echo "RAFT-hifiasm assembly" ;;
+    6) echo "Hifiasm assembly" ;;
     7) echo "Copy all assemblies" ;;
     8) echo "BUSCO for assemblies" ;;
     9) echo "Telomere contigs and metrics" ;;
@@ -250,7 +250,7 @@ write_versions() {
     echo "$c: FOUND (version unknown)"
   }
 
-  for c in canu nextDenovo peregrine ipa flye hifiasm seqtk busco quast.py quast minimap2 merge_wrapper.py raft bwa samtools python3; do
+  for c in canu nextDenovo peregrine ipa flye hifiasm seqtk busco quast.py quast minimap2 merge_wrapper.py bwa samtools python3; do
     getv "$c" >> "$vf"
   done
   echo "" >> "$vf"
@@ -268,7 +268,7 @@ Options:
   -s, --steps        Steps to run (optional, default: all). Accepts comma/range list (e.g. 1,2,5-7)
   --fasta            External pre-assembled FASTA (optional, single file or URL)
   --busco            Run BUSCO on each individual assembly; optional lineage (default: ascomycota_odb10)
-  --choose           Prompt to choose an assembler for the final merge (canu, nextDenovo, peregrine, ipa, flye, RAFT-hifiasm)
+  --choose           Prompt to choose an assembler for the final merge (canu, nextDenovo, peregrine, ipa, flye, hifiasm)
 
 Notes:
   • Per-step logs: logs/step_<N>.log with timestamps.
@@ -300,7 +300,7 @@ USAGE
 build_assembly_info_v2() {
   mkdir -p assemblies
   local info_csv="assemblies/assembly_info.csv"
-  local desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,RAFT-hifiasm"
+  local desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,hifiasm"
 
   printf '%s\n' "$desired_header" > "$info_csv"
 
@@ -391,7 +391,7 @@ while getopts ":g:t:s:m:-:" opt; do
           fi
           ;;
         choose)
-          echo "Please enter the assembler you want to use for the final merge (canu, nextDenovo, peregrine, ipa, flye, RAFT-hifiasm):"
+          echo "Please enter the assembler you want to use for the final merge (canu, nextDenovo, peregrine, ipa, flye, hifiasm):"
           read assembler
           ;;
         *) echo "Unknown option --${OPTARG}" >&2; usage ;;
@@ -445,7 +445,7 @@ cat <<EOT > ./run_${project}.cfg
 [General]
 job_type = local # local, slurm, sge, pbs, lsf
 job_prefix = nextDenovo
-task = all # all, correct, assemble
+task = assemble # all, correct, assemble
 rewrite = yes # yes/no
 deltmp = yes
 parallel_jobs = ${threads} # number of tasks used to run in parallel
@@ -468,7 +468,6 @@ nextgraph_options = -a 1
 EOT
 
 fastq=$(realpath "$fastq")
-
 echo "$fastq" > input_${project}.fofn
 echo "$fastq" > reads_${project}.lst
 
@@ -539,9 +538,6 @@ check_single_env_requirements() {
   if ! command -v quast.py >/dev/null 2>&1 && ! command -v quast >/dev/null 2>&1; then
     missing+=("quast.py/quast")
   fi
-  if ! command -v raft >/dev/null 2>&1; then
-    echo "[warn] 'raft' is not on PATH. Step 6 will fail unless RAFT is installed into this same environment." >&2
-  fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo "[error] Missing tools in the active conda environment: ${missing[*]}" >&2
     echo "[error] Create and activate the unified TAMP environment first, then rerun the pipeline." >&2
@@ -585,6 +581,11 @@ for step in "${steps[@]}"; do
     4)
       log_version "ipa" "ipa"
       echo "Step 4 - Assembly of the genome using IPA"
+       # Clean previous run to avoid Snakemake conflict
+       if [[ -d ipa ]]; then
+          echo "[INFO] Removing existing IPA run directory"
+          rm -rf ipa
+        fi
       ipa local --nthreads $threads --njobs 1 --run-dir ipa -i $fastq
       check_command
       ;;
@@ -599,18 +600,15 @@ for step in "${steps[@]}"; do
       mkdir -p hifiasm
       log_version "hifiasm" "hifiasm"
       cd hifiasm
-      hifiasm -o errorcorrect -t$threads --write-ec ../$fastq 2> errorcorrect.log
+      hifiasm -o hifiasm.asm -t "$threads" "$fastq" 2> hifiasm.log
       check_command
-      COVERAGE=$(grep "homozygous" errorcorrect.log | tail -1 | awk '{print $6}')
-      hifiasm -o getOverlaps -t$threads --dbg-ovec errorcorrect.ec.fa 2> getOverlaps.log
-      check_command
-      cat getOverlaps.0.ovlp.paf getOverlaps.1.ovlp.paf > overlaps.paf
-      raft -e ${COVERAGE} -o fragmented errorcorrect.ec.fa overlaps.paf
-      check_command
-      hifiasm -o finalasm -t$threads -r1 fragmented.reads.fasta 2> finalasm.log
-      check_command
-      awk '/^S/{print ">"$2;print $3}' finalasm.bp.hap1.p_ctg.gfa > RAFT-hifiasm.fasta
-      check_command
+      if [[ -f hifiasm.asm.bp.p_ctg.gfa ]]; then
+        awk '/^S/{print ">"$2;print $3}' hifiasm.asm.bp.p_ctg.gfa > hifiasm.fasta
+        check_command
+      else
+        echo "[error] Hifiasm primary contig GFA not found: hifiasm.asm.bp.p_ctg.gfa" >&2
+        exit 1
+      fi
       cd ..
       ;;
     7)
@@ -636,9 +634,9 @@ for step in "${steps[@]}"; do
       tmp_renamed="assemblies/.flye.renamed.tmp.fasta"
       rename_and_sort_fasta "./assemblies/flye.result.fasta" "$tmp_renamed" "flye" && mv -f "$tmp_renamed" "./assemblies/flye.result.fasta"
 
-      cp ./hifiasm/RAFT-hifiasm.fasta ./assemblies/RAFT-hifiasm.result.fasta
-      tmp_renamed="assemblies/.RAFT-hifiasm.renamed.tmp.fasta"
-      rename_and_sort_fasta "./assemblies/RAFT-hifiasm.result.fasta" "$tmp_renamed" "RAFT-hifiasm" && mv -f "$tmp_renamed" "./assemblies/RAFT-hifiasm.result.fasta"
+      cp ./hifiasm/hifiasm.fasta ./assemblies/hifiasm.result.fasta
+      tmp_renamed="assemblies/.hifiasm.renamed.tmp.fasta"
+      rename_and_sort_fasta "./assemblies/hifiasm.result.fasta" "$tmp_renamed" "hifiasm" && mv -f "$tmp_renamed" "./assemblies/hifiasm.result.fasta"
 
       if [[ -n "$external_fasta" ]]; then
         cp "$external_fasta" "./assemblies/external.result.fasta"
@@ -654,7 +652,7 @@ for step in "${steps[@]}"; do
         exit 1
       fi
 
-      cols=("canu" "external" "flye" "ipa" "nextDenovo" "peregrine" "RAFT-hifiasm")
+      cols=("canu" "external" "flye" "ipa" "nextDenovo" "peregrine" "hifiasm")
       lineage=${busco_lineage:-"ascomycota_odb10"}
       threads=${threads:-8}
 
@@ -708,7 +706,7 @@ for step in "${steps[@]}"; do
 import os, re, glob, csv
 
 OUT_CSV = os.path.join("assemblies", "assembly.busco.csv")
-DESIRED = ["canu","external","flye","ipa","nextDenovo","peregrine","RAFT-hifiasm"]
+DESIRED = ["canu","external","flye","ipa","nextDenovo","peregrine","hifiasm"]
 
 def newest(paths):
     return max(paths, key=os.path.getmtime) if paths else None
@@ -824,7 +822,7 @@ PY
         [[ -s ./peregrine-2021/asm_ctgs_m_p.fa ]] && cp ./peregrine-2021/asm_ctgs_m_p.fa ./assemblies/peregrine.result.fasta
         [[ -s ./ipa/assembly-results/final.p_ctg.fasta ]] && cp ./ipa/assembly-results/final.p_ctg.fasta ./assemblies/ipa.result.fasta
         [[ -s ./flye/assembly.fasta ]] && cp ./flye/assembly.fasta ./assemblies/flye.result.fasta
-        [[ -s ./hifiasm/RAFT-hifiasm.fasta ]] && cp ./hifiasm/RAFT-hifiasm.fasta ./assemblies/RAFT-hifiasm.result.fasta
+        [[ -s ./hifiasm/hifiasm.fasta ]] && cp ./hifiasm/hifiasm.fasta ./assemblies/hifiasm.result.fasta
         if [[ -n "$external_fasta" && -s "$external_fasta" ]]; then
           cp "$external_fasta" ./assemblies/external.result.fasta
         fi
@@ -836,7 +834,7 @@ PY
         exit 1
       fi
 
-      cols=("canu" "external" "flye" "ipa" "nextDenovo" "peregrine" "RAFT-hifiasm")
+      cols=("canu" "external" "flye" "ipa" "nextDenovo" "peregrine" "hifiasm")
       declare -A tdouble tsingle
 
       for fasta in assemblies/*.result.fasta; do
@@ -972,25 +970,18 @@ fi
       require_cmd seqtk
       seqtk telo -s 1 -m "$motif" allmerged_telo_sort.fasta > allmerged.telo.list
       t2t_list_inline -i allmerged.telo.list -o t2t.list
-
-# Extract selected contigs without faSomeRecords
-[[ -s t2t.list ]] || { echo "[warn] empty t2t.list"; touch t2t.fasta; }
-awk '
-BEGIN{
-  while((getline < "t2t.list") > 0){
-    gsub(/\r/,"")
-    keep[$1]=1
-  }
-}
-/^>/{
-  name=$0
-  sub(/^>/,"",name)
-  split(name, a, /[ \t]/)
-  id=a[1]
-  print_flag = (id in keep)
-}
-print_flag
-' allmerged_telo_sort.fasta > t2t.fasta
+      awk '
+      BEGIN {
+          while ((getline < "t2t.list") > 0) ids[$1]=1
+      }
+      {
+          if ($0 ~ /^>/) {
+              header = substr($0,2)
+              keep = (header in ids)
+          }
+          if (keep) print
+      }
+      ' allmerged_telo_sort.fasta > t2t.fasta
       require_cmd funannotate
       funannotate clean -i  t2t.fasta -p 30 -o  t2t_clean.fasta --exhaustive
       check_command
@@ -1021,7 +1012,7 @@ OUT = os.path.join("assemblies", "assembly.quast.csv")
 TREPORT = os.path.join("quast_out", "transposed_report.tsv")
 REPORT  = os.path.join("quast_out", "report.tsv")
 
-DESIRED = ["canu","external","flye","ipa","nextDenovo","peregrine","RAFT-hifiasm"]
+DESIRED = ["canu","external","flye","ipa","nextDenovo","peregrine","hifiasm"]
 
 def norm(s):
     return (s or "").lower().replace("-", "").replace("_", "").replace(".result", "").replace(".fasta","").strip()
@@ -1048,10 +1039,10 @@ def build_from_report(pth):
             if j in used: continue
             if nd in (norm(h),) or nd == norm(h) or norm(h).startswith(nd) or nd in norm(h):
                 idx = j; break
-        if idx is None and nd == "rafthifiasm":
+        if idx is None and nd == "hifiasm":
             for j, h in enumerate(asm_headers):
                 nh = norm(h)
-                if "raft" in nh and "hifiasm" in nh:
+                if "hifiasm" in nh:
                     idx = j; break
         mapcol[d] = idx
         if idx is not None: used.add(idx)
@@ -1083,7 +1074,7 @@ def build_from_transposed(pth):
             if maprow[d] is not None: continue
             if nd == na or nd in na or na in nd:
                 maprow[d] = i
-            elif nd == "rafthifiasm" and ("raft" in na and "hifiasm" in na):
+            elif nd == "hifiasm" and ("hifiasm" in na):
                 maprow[d] = i
 
     out = [["Metric"] + DESIRED]
@@ -1226,7 +1217,7 @@ PY
 
         if (( ${#parts[@]} > 0 )); then
           info_csv="assemblies/assembly_info.csv"
-          desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,RAFT-hifiasm"
+          desired_header="Metric,canu,external,flye,ipa,nextDenovo,peregrine,hifiasm"
           echo "$desired_header" > "$info_csv"
           for f in "${parts[@]}"; do
             awk -v TARGET="$desired_header" -F',' -v OFS=',' '
@@ -1271,7 +1262,7 @@ PY
         fi
       fi
 
-      valid_assemblers="canu external flye ipa nextDenovo peregrine RAFT-hifiasm"
+      valid_assemblers="canu external flye ipa nextDenovo peregrine hifiasm"
       if [[ -z "${assembler:-}" ]]; then
         if ! prompt_from_tty assembler "Enter the assembler to use for the final merge (e.g., ${valid_assemblers// /, }): "; then
           echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
