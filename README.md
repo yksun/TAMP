@@ -1,3 +1,5 @@
+<img align="right" src="/docs/tamp-icon.png">
+
 # TAMP
 
 **Telomere Assembly Merge Pipeline**
