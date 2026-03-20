@@ -1,126 +1,279 @@
-<p align="center">
-  <img src="docs/tamp-icon.png" alt="TAMP logo" width="220">
-</p>
+<img align="right" src="/docs/tamp-icon.png">
 
 # TAMP
+
 **Telomere Assembly Merge Pipeline**
 
-TAMP is a modular workflow for **genome assembly benchmarking, telomere-aware evaluation, and final assembly merging**. It is designed for **PacBio HiFi reads** and is especially useful for **small eukaryotic genomes**, with a strong initial focus on **fungal genomes**. The pipeline runs multiple assemblers, standardizes their outputs, compares their quality, identifies telomeric contigs, and builds a final merged assembly while protecting contigs that appear to be telomere-to-telomere (T2T).
+TAMP is a telomere-aware genome assembly workflow for benchmarking, comparing, and merging assemblies into improved chromosome-scale candidates. The pipeline was developed for small eukaryotic genomes, with a focus on fungal genomes and PacBio HiFi reads. It runs multiple assemblers, standardizes their outputs, evaluates assembly quality, detects telomeric contigs, and builds a final merged assembly while protecting telomere-to-telomere (T2T) candidates.
 
-TAMP was built to support both day-to-day assembly work and formal benchmarking for publication. It writes step-level logs, software version records, and machine-readable benchmark summaries that can be used directly in supplementary materials, methods documentation, and reproducibility reports.
+TAMP was developed at the **Grainger Bioinformatics Center, Field Museum of Natural History**.
 
-This repository uses generic file names for the main entry points:
-
-- `TAMP.sh`
-- `install_tamp.sh`
-- `tamp-env.yml`
-
-These generic names make the workflow easier to install, document, and cite across releases.
-
----
-
-## Why use TAMP?
-
-Genome assembly often requires testing more than one assembler because different tools can produce different results from the same read set. One assembler may produce fewer contigs, another may recover more complete genes, and another may better preserve chromosome ends. TAMP helps organize this process into one workflow.
-
-TAMP is especially useful when you want to:
-
-- compare several long-read assemblers on the same dataset
-- standardize and rank assemblies before choosing a final result
-- detect telomeric contigs and estimate chromosome completeness
-- merge assemblies while protecting high-confidence T2T contigs
-- generate benchmark logs for internal validation or publication
+![Latest Version](https://img.shields.io/github/v/tag/yksun/TAMP?label=Latest%20Version)
+![Last Commit](https://img.shields.io/github/last-commit/yksun/TAMP)
+![Issues](https://img.shields.io/github/issues/yksun/TAMP)
+![BioConda](https://img.shields.io/badge/BioConda-coming_soon-lightgrey)
+![Docker](https://img.shields.io/badge/Docker-coming_soon-lightgrey)
+![Singularity](https://img.shields.io/badge/Singularity-coming_soon-lightgrey)
 
 ---
 
-## Main features
+<a id="table-of-contents"></a>
+## Table of Contents
 
-TAMP can:
-
-- run multiple assemblers: **HiCanu, NextDenovo, Peregrine, IPA, Flye, and hifiasm**
-- copy and normalize assemblies into a common structure
-- rename contigs consistently and sort them by length
-- detect telomeric contigs and summarize telomere signals
-- run **BUSCO** and **QUAST** for assembly evaluation
-- build a unified comparison table across assemblers
-- preserve T2T contigs during final merging
-- produce machine-readable benchmark logs and version tracking files
+- [Overview](#overview)
+- [Features](#features)
+- [Workflow](#workflow)
+- [Installation](#installation)
+  - [Conda Environment](#conda-environment)
+  - [Manual Installation (Recommended for Canu and Redundans)](#manual-installation)
+- [Usage](#usage)
+  - [Basic Command](#basic-command)
+  - [Parameters](#parameters)
+  - [Example Run](#example-run)
+- [Pipeline Steps](#pipeline-steps)
+- [Input Data Recommendations](#input-data-recommendations)
+- [Dependencies](#dependencies)
+- [Output Structure](#output-structure)
+- [Benchmark Logging](#benchmark-logging)
+- [Troubleshooting](#troubleshooting)
+- [Citation and Archiving](#citation-and-archiving)
+- [Acknowledgements](#acknowledgements)
 
 ---
 
-## System requirements
+<a id="overview"></a>
+## Overview
 
-TAMP is intended for **Linux**. A recent Linux distribution with standard shell utilities is recommended. The workflow expects the required software to be available on `PATH` through the installed environment and helper launchers.
+Genome assemblers often produce different results from the same long-read dataset. One assembler may recover longer contigs, another may preserve more complete chromosome ends, and another may recover better consensus in repeat-rich regions. TAMP was built to make these comparisons systematic and reproducible.
 
-Recommended resources depend on genome size, read depth, and which assemblers are enabled. For small fungal genomes, a multi-core workstation or server is usually sufficient. Larger genomes or very deep HiFi datasets will require more RAM, more CPU time, and more temporary storage.
+The pipeline runs several assemblers, normalizes their outputs, measures assembly quality, detects telomeric contigs, and combines the results into a unified comparison table. It then supports a final merge step that preserves telomere-to-telomere contigs and reduces redundancy among the remaining contigs.
 
----
+TAMP is especially useful when the goal is not only to maximize contiguity, but also to recover biologically meaningful chromosome-end structure.
 
-## Software dependencies
+<a id="features"></a>
+## Features
 
-TAMP depends on a conda environment plus one manually installed component.
+- Run multiple assemblers from one workflow.
+- Standardize output FASTA files for direct comparison.
+- Detect telomeric contigs and summarize telomere support.
+- Evaluate assemblies with QUAST and BUSCO.
+- Build a unified `assembly_info.csv` table before final merging.
+- Preserve T2T contigs during final merge.
+- Generate machine-readable benchmark logs for reproducibility.
+- Record software versions and step-by-step logs for each run.
 
-### Core conda environment
+<a id="workflow"></a>
+## Workflow
 
-The main environment is defined in `tamp-env.yml`. It should include the following software families.
+TAMP follows this high-level order:
 
-#### Assemblers
+1. Run one or more assemblers.
+2. Normalize assembly outputs and contig names.
+3. Detect telomeric contigs for each assembly.
+4. Evaluate assemblies with QUAST and BUSCO.
+5. Build a combined summary table across assemblies.
+6. Select a preferred assembly for the final merge.
+7. Preserve T2T contigs and merge non-T2T contigs.
+8. Run final telomere checks, final BUSCO/QUAST, and summary reporting.
 
-- `canu`
-- `nextdenovo`
-- `peregrine-2021`
-- `pbipa`
-- `flye`
-- `hifiasm`
+A schematic workflow figure can be added in `docs/` and linked here when ready.
 
-#### Alignment and assembly utilities
+<a id="installation"></a>
+## Installation
 
-- `minimap2`
-- `bwa`
-- `samtools`
-- `seqtk`
-- `miniasm`
-- `quickmerge`
+TAMP uses a primary Conda or Micromamba environment for most tools. At present, **Redundans is installed manually** because of dependency conflicts with the modern Conda stack used by other tools. **Canu may also be installed manually** if your local package resolution selects an unstable development build or if your environment has persistent solver conflicts.
 
-#### Quality assessment and annotation support
+<a id="conda-environment"></a>
+### Conda Environment
 
-- `busco`
-- `quast`
-- `funannotate`
+Create the main environment from `tamp-env.yml`:
 
-#### General tools and build support
+```bash
+micromamba create -n tamp -f tamp-env.yml
+micromamba activate tamp
+```
 
-- `python=3.10`
-- `numpy`
-- `pandas`
-- `parallel`
-- `pigz`
-- `curl`
-- `wget`
-- `git`
-- `make`
-- `gxx_linux-64`
+Or with Conda:
 
-### Manual dependency: Redundans
+```bash
+conda env create -n tamp -f tamp-env.yml
+conda activate tamp
+```
 
-`redundans` is installed **outside the conda environment** by the installer because current conda builds of `redundans` can conflict with modern builds of tools such as `minimap2`, `seqtk`, and `hifiasm`. TAMP therefore installs the `redundans` repository directly into the TAMP installation folder and creates a launcher for it.
+If you use the provided installer:
 
-This manual install approach preserves a clean modern conda environment while keeping `redundans` available for the final merge workflow.
+```bash
+bash install_tamp.sh
+```
 
-### Redundans-related tools
+The installer is intended to place TAMP under `~/opt/TAMP` by default and create launchers in `~/opt/bin`.
 
-The upstream `redundans` project documents a broad set of tools. Not all of them are required for every TAMP run. TAMP mainly relies on the core tools needed for redundancy reduction and related alignment tasks. The most relevant runtime requirements are:
+<a id="manual-installation"></a>
+### Manual Installation (Recommended for Canu and Redundans)
 
-- `python` (3.8 to <3.11)
-- `minimap2`
-- `bwa`
-- `miniasm`
-- standard Unix shell tools
+#### Redundans
 
-The upstream `redundans` repository also documents additional tools that may be used in some configurations or advanced modes:
+Clone and install Redundans manually inside the TAMP installation directory:
 
+```bash
+cd ~/opt/TAMP
+git clone --recursive https://github.com/Gabaldonlab/redundans.git
+cd redundans
+bash INSTALL.sh
+```
+
+If `INSTALL.sh` is not suitable on your system, use the upstream compile script:
+
+```bash
+bash bin/.compile.sh
+```
+
+Then make sure `redundans.py` is available on your `PATH`, or create a launcher script in `~/opt/bin`.
+
+#### Canu
+
+If `canu -version` reports a development build such as `master +XX changes`, do not use it for production runs. Install a stable Canu release instead. If the Conda solver cannot provide a stable build in your environment, compile Canu manually:
+
+```bash
+cd ~/opt
+curl -LRO https://github.com/marbl/canu/releases/download/v2.3/canu-2.3.Linux-amd64.tar.xz
+tar -xJf canu-2.3.*.tar.xz
+```
+
+Then expose the stable binary:
+
+```bash
+export PATH="$HOME/opt/canu-2.3/build/bin:$PATH"
+```
+
+<a id="usage"></a>
+## Usage
+
+<a id="basic-command"></a>
+### Basic Command
+
+Run TAMP in a dedicated working directory and provide the input FASTQ file by absolute path:
+
+```bash
+TAMP.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG
+```
+
+<a id="parameters"></a>
+### Parameters
+
+| Parameter | Meaning |
+|---|---|
+| `-g`, `--genomesize` | Estimated haploid genome size, such as `12m`, `40m`, or `2g`. |
+| `-t`, `--threads` | Number of CPU threads to use. |
+| `--fastq` | Input FASTQ file. Use an absolute path if the working directory is separate from the data directory. |
+| `-m`, `--motif` | Telomere motif or telomere seed motif used by the pipeline. |
+| `-s`, `--steps` | Run only selected steps, for example `1,3-5`. |
+| `--fasta` | External pre-assembled FASTA to include in the comparison. |
+| `--busco` | Run BUSCO and optionally set the lineage dataset. |
+| `--choose` | Prompt for the assembly to use in the final merge. |
+
+<a id="example-run"></a>
+### Example Run
+
+For *Saccharomyces cerevisiae* PacBio HiFi data:
+
+```bash
+mkdir -p ~/Storage/projects/TAMP/SRR13577847
+cd ~/Storage/projects/TAMP/SRR13577847
+
+TAMP.sh \
+  -g 12m \
+  -t 16 \
+  --fastq ~/Storage/projects/TAMP/data/SRR13577847.fastq \
+  -m TGTG
+```
+
+For fungi with vertebrate-like telomere repeats, such as *Neurospora crassa*, use a different motif as appropriate, for example `TTAGGG`.
+
+<a id="pipeline-steps"></a>
+## Pipeline Steps
+
+TAMP currently implements the following major steps:
+
+1. HiCanu assembly
+2. NextDenovo assembly
+3. Peregrine assembly
+4. IPA assembly
+5. Flye assembly
+6. Hifiasm assembly
+7. Copy and normalize all assemblies
+8. BUSCO on all assemblies
+9. Telomere contig detection and telomere metrics
+10. Merge all assemblies
+11. QUAST for assembler results
+12. Final merge using the selected assembly
+13. BUSCO analysis of final assembly
+14. Telomere analysis of final assembly
+15. QUAST analysis of final assembly
+16. Final comparison report
+17. Cleanup into structured output folders
+
+<a id="input-data-recommendations"></a>
+## Input Data Recommendations
+
+TAMP is best suited to long-read data, especially PacBio HiFi reads, for small eukaryotic genomes. For publication-quality benchmarking:
+
+- Use public datasets with stable accession numbers.
+- Report the source of all third-party datasets.
+- Use machine-readable input and output files.
+- Archive the exact code release used for the analysis.
+
+For fungal benchmarking, it is helpful to include a mix of:
+
+- a small yeast genome,
+- a medium filamentous fungal genome,
+- and, if possible, a more repeat-rich genome.
+
+<a id="dependencies"></a>
+## Dependencies
+
+### Core pipeline environment
+
+The main environment is expected to provide:
+
+- python
+- canu
+- nextdenovo
+- peregrine-2021
+- pbipa
+- flye
+- hifiasm
+- minimap2
+- bwa
+- samtools
+- seqtk
+- miniasm
+- busco
+- quast
+- funannotate
+- quickmerge
+- pigz
+- curl
+- wget
+- git
+- make
+- gxx_linux-64
+- parallel
+- numpy
+- pandas
+
+### Additional tools used outside the main environment
+
+#### Redundans requirements
+
+Redundans can use several external tools. Not all of them are required for every TAMP run, but the upstream software lists the following resources:
+
+- Python
 - Platanus
+- Miniasm
+- Minimap2
 - LAST
+- BWA
 - SNAP aligner
 - SSPACE3
 - GapCloser
@@ -129,280 +282,67 @@ The upstream `redundans` repository also documents additional tools that may be 
 - Merqury
 - k8
 - R
-- `r-ggplot2`
-- `r-scales`
-- `r-argparse`
+- ggplot2
+- scales
+- argparse for R
 
-These extra tools are **not required for the main TAMP workflow unless you extend the redundans usage beyond the default pipeline behavior**.
+In practice, the TAMP workflow mainly depends on the subset needed for the specific Redundans operations invoked during the final merge.
 
----
+<a id="output-structure"></a>
+## Output Structure
 
-## Installation
+Typical output files and folders include:
 
-### Recommended installation
+- `assemblies/` — normalized assembly FASTA files and summary tables
+- `logs/` — per-step log files
+- `benchmark_logs/` — machine-readable benchmark and timing outputs
+- `version.txt` — software versions recorded for the run
+- final merged assembly files
+- telomere summary files
+- QUAST and BUSCO result directories
 
-Run the installer from the repository directory:
+<a id="benchmark-logging"></a>
+## Benchmark Logging
 
-```bash
-bash install_tamp.sh
-```
-
-The installer will:
-
-1. detect the latest `TAMP-*.sh` script in the folder and install it as `TAMP.sh`
-2. copy `TAMP.sh`, `install_tamp.sh`, and `tamp-env.yml` into the installation directory
-3. create or update the `tamp` conda environment from `tamp-env.yml`
-4. clone and install `redundans` manually into the TAMP installation directory
-5. create command launchers so `TAMP.sh` can be run without manually activating the environment each time
-6. add the launcher path to `~/.bashrc` if needed
-
-By default, the installer uses `~/opt` as the installation base and installs TAMP under:
-
-```text
-~/opt/TAMP
-```
-
-### Installation layout
-
-A typical installation looks like this:
-
-```text
-~/opt/
-├── TAMP/
-│   ├── TAMP.sh
-│   ├── TAMP-0.30.sh
-│   ├── install_tamp.sh
-│   ├── tamp-env.yml
-│   ├── redundans/
-│   ├── logs/
-│   └── benchmark_logs/
-└── bin/
-    ├── TAMP.sh
-    └── redundans.py
-```
-
-### Environment notes
-
-TAMP can be used with `conda`, `mamba`, or `micromamba`, but it is best to keep your shell initialization simple and consistent. If you already use conda or mamba through Miniforge, that is usually the easiest option.
-
----
-
-## Input requirements
-
-TAMP uses long-read sequence data as input.
-
-### Required inputs
-
-- PacBio HiFi FASTQ file
-- genome size estimate (for example `12m`, `40m`, or `2g`)
-- telomere motif or telomere seed motif appropriate for the target species
-
-### Optional inputs
-
-- external pre-assembled FASTA file
-- BUSCO lineage dataset
-- selected steps only
-- explicit assembler choice for the final merge
-
----
-
-## Choosing genome size and telomere motif
-
-The genome size and telomere motif should match the organism you are assembling.
-
-### Examples
-
-- *Saccharomyces cerevisiae*: genome size about **12 Mb**
-- *Neurospora crassa*: genome size about **40 Mb**
-
-Telomere motifs also vary by species.
-
-- `TTAGGG` is appropriate for organisms with vertebrate-like telomeres, including some fungi such as *Neurospora crassa*
-- *Saccharomyces cerevisiae* does **not** use a fixed `TTAGGG` repeat. Its telomeres are heterogeneous **TG1-3** repeats, so a short TG-rich seed motif such as `TGTG` is a better practical choice than `TTAGGG`
-
-Do **not** assume one motif works for all fungi.
-
----
-
-## Basic usage
-
-### Example 1: full run
-
-```bash
-TAMP.sh \
-  -g 40m \
-  -t 16 \
-  --fastq /path/to/reads.fastq \
-  -m TTAGGG
-```
-
-### Example 2: selected steps only
-
-```bash
-TAMP.sh \
-  -g 40m \
-  -t 16 \
-  --fastq /path/to/reads.fastq \
-  -m TTAGGG \
-  -s 1,3-5
-```
-
-### Example 3: BUSCO on assemblies and interactive final assembler choice
-
-```bash
-TAMP.sh \
-  -g 40m \
-  -t 16 \
-  --fastq /path/to/reads.fastq \
-  -m TTAGGG \
-  --busco fungi_odb10 \
-  --choose
-```
-
-### Example 4: *Saccharomyces cerevisiae*
-
-```bash
-TAMP.sh \
-  -g 12m \
-  -t 16 \
-  --fastq /path/to/SRR13577847.fastq \
-  -m TGTG
-```
-
----
-
-## Command-line options
-
-```text
--g, --genomesize   Genome size (required), for example 40m or 2g
--t, --threads      Number of CPU threads (required)
---fastq            Input FASTQ file (required)
--m, --motif        Telomere motif or seed motif (required)
--s, --steps        Steps to run, for example 1,3-5
---fasta            External pre-assembled FASTA file or URL
---busco            Run BUSCO on each assembly; optional lineage can be given
---choose           Choose the final assembler interactively
-```
-
----
-
-## Pipeline steps
-
-1. **HiCanu assembly**  
-2. **NextDenovo assembly**  
-3. **Peregrine assembly**  
-4. **IPA assembly**  
-5. **Flye assembly**  
-6. **Hifiasm assembly**  
-7. **Copy and standardize assemblies**  
-8. **BUSCO on assemblies**  
-9. **Telomere contig detection and telomere metrics**  
-10. **Merge all assemblies**  
-11. **QUAST on assembler results**  
-12. **Final merge using the selected assembler**  
-13. **BUSCO on final assembly**  
-14. **Telomere analysis on final assembly**  
-15. **QUAST on final assembly**  
-16. **Final comparison report**  
-17. **Cleanup and file organization**
-
----
-
-## Output files
-
-TAMP writes its results into the current working directory.
-
-Important output locations include:
-
-- `assemblies/` — assembly FASTA files, telomere lists, and summary tables
-- `logs/` — per-step logs
-- `benchmark_logs/` — machine-readable benchmark and runtime summaries
-- `version.txt` — software version log
-- final merged assembly FASTA files and telomere summary files
-
-### Benchmark logging outputs
-
-TAMP writes benchmark-friendly output files such as:
+TAMP writes benchmark-oriented logs to support reproducible testing and publication reporting. These can include:
 
 - `benchmark_logs/run_metadata.tsv`
 - `benchmark_logs/step_benchmark.tsv`
 - `benchmark_logs/run_summary.txt`
 
-These files are intended to support:
+These files are intended to make it easier to report runtime, software versions, and step status in benchmark tables and supplementary material.
 
-- internal pipeline testing
-- runtime benchmarking
-- manuscript preparation
-- supplementary materials for reproducibility
+<a id="troubleshooting"></a>
+## Troubleshooting
 
----
+### Canu reports `master +XX changes`
 
-## Recommended project layout
+You are using a development build, not a stable release. Replace it with a stable Canu installation before benchmarking.
 
-A clean working structure is:
+### Micromamba activates the wrong environment root
 
-```text
-TAMP/
-├── data/
-│   ├── SRR13577847.fastq
-│   └── SRR18210286.fastq
-├── SRR13577847/
-├── SRR18210286/
-├── TAMP.sh
-├── install_tamp.sh
-├── tamp-env.yml
-└── README.md
+Set the correct root prefix in your shell configuration, then reopen the shell:
+
+```bash
+export MAMBA_ROOT_PREFIX="$HOME/.local/share/mamba"
 ```
 
-You can keep the raw data in `data/` and create one working directory per dataset. This makes reruns easier and keeps raw input separate from generated output.
+### Telomere motif appears incorrect
 
----
-
-## Notes on reproducibility
-
-TAMP was designed with reproducibility in mind.
-
-The pipeline records:
-
-- software versions
-- per-step logs
-- benchmark-ready timing tables
-- standardized output tables for assembly comparison
-
-For publication, it is recommended to archive the exact code release and environment files used for the study.
-
----
-
-## Citation and archiving
-
-If you use TAMP in a publication, please cite the software and archive the exact release used for the analysis in a persistent repository such as Zenodo. Citing the archived release in the manuscript helps ensure transparency, reproducibility, and long-term access to the specific version used in the study.
-
-TAMP was developed at the Grainger Bioinformatics Center, Field Museum of Natural History, Chicago, Illinois, USA.
-
----
-
-## Troubleshooting
+Do not assume the same motif for all fungi. Choose a motif or seed motif appropriate for the target organism.
 
 ### `TAMP.sh: command not found`
 
-Run the installed launcher directly:
+Add the install directory or launcher directory to your `PATH`, or run TAMP using the full path.
 
-```bash
-~/opt/TAMP/TAMP.sh -h
-```
+<a id="citation-and-archiving"></a>
+## Citation and Archiving
 
-If needed, add the install path to `PATH`.
+If you use TAMP in a publication, please cite the software and archive the exact release used for the analysis in a persistent public repository such as Zenodo. Citing the archived release helps ensure that the software version used in the study remains accessible and reproducible.
 
-### `redundans.py` not found
+TAMP was developed at the Grainger Bioinformatics Center, Field Museum of Natural History, Chicago, Illinois, USA.
 
-Re-run the installer and check that the `redundans` repository was cloned into the installation folder and that the launcher exists in `~/opt/bin`.
+<a id="acknowledgements"></a>
+## Acknowledgements
 
-### Wrong telomere motif
-
-If telomere detection looks wrong, check the species-specific telomere repeat. Do not reuse one motif for all fungi.
-
----
-
-## License
-
-
+TAMP was developed in the context of genome assembly benchmarking and telomere-aware merging workflows at the Grainger Bioinformatics Center, Field Museum of Natural History.
