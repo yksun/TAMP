@@ -7,24 +7,27 @@
 
 <img align="center" src="/docs/tamp-icon.png">
 
-### Table of Contents
+## Table of Contents
 
 - [TAMP](#tamp)
   - [Overview](#overview)
+  - [Features](#features)
+  - [Workflow](#workflow)
   - [Installation](#installation)
-    - [Conda / Micromamba](#conda--micromamba)
-    - [Manual installation](#manual-installation)
+    - [Conda Environment](#conda-environment)
+    - [Manual Installation (Recommended for Canu & Redundans)](#manual-installation-recommended-for-canu--redundans)
     - [Docker (coming soon)](#docker-coming-soon)
     - [Singularity (coming soon)](#singularity-coming-soon)
-  - [Running the pipeline](#running-the-pipeline)
+  - [Usage](#usage)
+    - [Basic Command](#basic-command)
     - [Parameters](#parameters)
-    - [Example run](#example-run)
-  - [Output](#output)
-  - [Benchmarking](#benchmarking)
+    - [Example Run](#example-run)
+  - [Pipeline Steps](#pipeline-steps)
   - [Dependencies](#dependencies)
-  - [Support](#support)
+  - [Output Structure](#output-structure)
+  - [Troubleshooting](#troubleshooting)
   - [Citation](#citation)
-
+  - [Acknowledgements](#acknowledgements)
 
 
 # TAMP
