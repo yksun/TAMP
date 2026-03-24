@@ -87,24 +87,24 @@ TACO uses a primary Conda or Micromamba environment for most tools. At present, 
 <a id="conda-environment"></a>
 ### Conda Environment
 
-Create the main environment from `tamp-env.yml`:
+Create the main environment from `taco-env.yml`:
 
 ```bash
-micromamba create -n tamp -f tamp-env.yml
-micromamba activate tamp
+micromamba create -n taco -f taco-env.yml
+micromamba activate taco
 ```
 
 Or with Conda:
 
 ```bash
-conda env create -n tamp -f tamp-env.yml
-conda activate tamp
+conda env create -n taco -f taco-env.yml
+conda activate taco
 ```
 
 If you use the provided installer:
 
 ```bash
-bash install_tamp.sh
+bash install_taco.sh
 ```
 
 The installer is intended to place TACO under `~/opt/TACO` by default and create launchers in `~/opt/bin`.
