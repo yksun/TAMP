@@ -1278,76 +1278,127 @@ PY
         esac
       done
 
-      # When --choose is not provided, automatically pick the assembler
-      # with the highest N50 from assemblies/assembly_info.csv.
-      # If --choose is given, we honor that choice (after validation).
-      if [[ $CHOOSE_FLAG -eq 0 && -z "$assembler" ]]; then
-        if [[ ! -s assemblies/assembly_info.csv ]]; then
-          echo "[warn] assemblies/assembly_info.csv missing or empty; cannot auto-select assembler by N50." >&2
-        else
-          assembler="$(
-            python3 - <<'PY'
-import csv
-import sys
+# ----------------------------------------
+# Auto-selection mode (v0.5.0)
+# ----------------------------------------
+AUTO_MODE="smart"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --auto-mode)
+      AUTO_MODE="$2"
+      shift 2
+      ;;
+    --auto-mode=*)
+      AUTO_MODE="${1#--auto-mode=}"
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+echo "[info] Auto-selection mode: $AUTO_MODE"
+
+if [[ $CHOOSE_FLAG -eq 0 && -z "$assembler" ]]; then
+  if [[ ! -s assemblies/assembly_info.csv ]]; then
+    echo "[warn] assemblies/assembly_info.csv missing; cannot auto-select." >&2
+  else
+
+    assembler="$(
+python3 - <<PY
+import csv, math, sys
 from pathlib import Path
 
+mode = "${AUTO_MODE}".strip().lower()
 info = Path("assemblies") / "assembly_info.csv"
+
 try:
     with info.open(newline="") as f:
         rows = list(csv.reader(f))
-except FileNotFoundError:
+except:
     sys.exit(0)
 
 if not rows:
     sys.exit(0)
 
-header = rows[0]
+header = [h.strip() for h in rows[0]]
 rows = rows[1:]
 
-target = None
+busco_row = None
+contig_row = None
+n50_row = None
+
 for r in rows:
     if not r:
         continue
     name = r[0].strip().lower()
-    if "n50" in name:
-        target = r
-        break
 
-if target is None:
-    sys.exit(0)
+    if "busco c (%)" in name:
+        busco_row = r
+    elif name == "# contigs":
+        contig_row = r
+    elif name == "n50":
+        n50_row = r
 
 best_name = None
-best_val = None
-for idx, col_name in enumerate(header[1:], start=1):
-    asm = (col_name or "").strip()
+best_score = None
+
+for idx, asm in enumerate(header[1:], start=1):
+    asm = asm.strip()
     if not asm:
         continue
-    if idx >= len(target):
-        continue
-    val_str = (target[idx] or "").replace(",", "").strip()
-    if not val_str:
-        continue
-    try:
-        n50 = float(val_str)
-    except ValueError:
-        continue
+
     fa = Path("assemblies") / f"{asm}.result.fasta"
     if not fa.is_file() or fa.stat().st_size == 0:
         continue
-    if best_val is None or n50 > best_val:
-        best_name, best_val = asm, n50
 
-if best_name is not None:
+    def get(row):
+        try:
+            return float(row[idx])
+        except:
+            return None
+
+    busco = get(busco_row) if busco_row else None
+    contigs = get(contig_row) if contig_row else None
+    n50 = get(n50_row) if n50_row else None
+
+    if mode == "n50":
+        if n50 is None or n50 <= 0:
+            continue
+        score = n50
+
+    else:
+        if busco is None or contigs is None or n50 is None:
+            continue
+        if contigs <= 0 or n50 <= 0:
+            continue
+
+        score = (
+            busco * 1000
+            - contigs * 10
+            + math.log10(n50) * 100
+        )
+
+    print(f"[DEBUG] {asm}: BUSCO={busco} contigs={contigs} N50={n50} score={score}", file=sys.stderr)
+
+    if best_score is None or score > best_score:
+        best_name = asm
+        best_score = score
+
+if best_name:
     print(best_name)
 PY
-          )"
-          if [[ -n "$assembler" ]]; then
-            echo "[info] Auto-selected assembler with highest N50: $assembler"
-          else
-            echo "[warn] Unable to auto-select assembler from assemblies/assembly_info.csv; will fall back to manual choice." >&2
-          fi
-        fi
-      fi
+    )"
+
+    if [[ -n "$assembler" ]]; then
+      echo "[info] Auto-selected assembler: $assembler"
+    else
+      echo "[warn] Auto-selection failed; fallback required." >&2
+    fi
+  fi
+fi
 
       if [[ -z "$assembler" ]]; then
         if [[ ! -d assemblies ]]; then
