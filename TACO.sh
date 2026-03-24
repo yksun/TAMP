@@ -1254,29 +1254,46 @@ PY
       build_assembly_info_v2
       echo "Step 12 - Final assembly refinement with telomere-supported contig replacement"
 
-      assembler=""
-      CHOOSE_FLAG=0
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --choose)
-            CHOOSE_FLAG=1
-            if [ -n "${2:-}" ] && [ "${2#-}" != "$2" ] ; then
-              :
-            else
-              if [ -n "${2:-}" ]; then assembler="$2"; shift; fi
-            fi
-            shift
-            ;;
-          --choose=*)
-            CHOOSE_FLAG=1
-            assembler="${1#--choose=}"
-            shift
-            ;;
-          *)
-            shift
-            ;;
-        esac
-      done
+assembler=""
+CHOOSE_FLAG=0
+AUTO_MODE="smart"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --choose)
+      CHOOSE_FLAG=1
+      if [[ -n "${2:-}" && "${2#-}" == "$2" ]]; then
+        assembler="$2"
+        shift 2
+      else
+        shift
+      fi
+      ;;
+    --choose=*)
+      CHOOSE_FLAG=1
+      assembler="${1#--choose=}"
+      shift
+      ;;
+    --auto-mode)
+      if [[ -n "${2:-}" && "${2#-}" == "$2" ]]; then
+        AUTO_MODE="$2"
+        shift 2
+      else
+        echo "[error] --auto-mode requires a value (smart or n50)." >&2
+        exit 2
+      fi
+      ;;
+    --auto-mode=*)
+      AUTO_MODE="${1#--auto-mode=}"
+      shift
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+echo "[info] Auto-selection mode: $AUTO_MODE"
 
 # ----------------------------------------
 # Auto-selection mode (v0.5.0)
@@ -1315,11 +1332,13 @@ from pathlib import Path
 
 mode = "${AUTO_MODE}".strip().lower()
 info = Path("assemblies") / "assembly_info.csv"
+debug_tsv = Path("assemblies") / "selection_debug.tsv"
+decision_txt = Path("assemblies") / "selection_decision.txt"
 
 try:
     with info.open(newline="") as f:
         rows = list(csv.reader(f))
-except:
+except Exception:
     sys.exit(0)
 
 if not rows:
@@ -1338,7 +1357,6 @@ for r in rows:
     if not r:
         continue
     name = r[0].strip().lower()
-
     if "busco c (%)" in name:
         busco_row = r
     elif name == "# contigs":
@@ -1352,6 +1370,7 @@ for r in rows:
 
 best_name = None
 best_score = None
+records = []
 
 for idx, asm in enumerate(header[1:], start=1):
     asm = asm.strip()
@@ -1362,27 +1381,25 @@ for idx, asm in enumerate(header[1:], start=1):
     if not fa.is_file() or fa.stat().st_size == 0:
         continue
 
-    def get(row):
+    def get(row, default=0.0):
         try:
             return float(row[idx])
-        except:
-            return 0.0
+        except Exception:
+            return default
 
-    busco   = get(busco_row)
-    contigs = get(contig_row)
-    n50     = get(n50_row)
-    t2t     = get(t2t_row)
-    single  = get(single_row)
+    busco   = get(busco_row, 0.0)
+    contigs = get(contig_row, 0.0)
+    n50     = get(n50_row, 0.0)
+    t2t     = get(t2t_row, 0.0)
+    single  = get(single_row, 0.0)
 
     if mode == "n50":
         if n50 <= 0:
             continue
         score = n50
-
     else:
         if contigs <= 0 or n50 <= 0:
             continue
-
         score = (
             busco * 1000
             + t2t * 500
@@ -1391,11 +1408,32 @@ for idx, asm in enumerate(header[1:], start=1):
             + math.log10(n50) * 100
         )
 
+    records.append({
+        "assembler": asm,
+        "busco_c": busco,
+        "t2t": t2t,
+        "single_tel": single,
+        "contigs": contigs,
+        "n50": n50,
+        "score": score,
+    })
+
     print(f"[DEBUG] {asm}: BUSCO={busco} T2T={t2t} single={single} contigs={contigs} N50={n50} score={score}", file=sys.stderr)
 
     if best_score is None or score > best_score:
         best_name = asm
         best_score = score
+
+with debug_tsv.open("w", newline="") as f:
+    w = csv.writer(f, delimiter="\\t")
+    w.writerow(["assembler", "busco_c", "t2t", "single_tel", "contigs", "n50", "score"])
+    for r in records:
+        w.writerow([r["assembler"], r["busco_c"], r["t2t"], r["single_tel"], r["contigs"], r["n50"], r["score"]])
+
+with decision_txt.open("w") as f:
+    f.write(f"auto_mode\\t{mode}\\n")
+    f.write(f"selected_assembler\\t{best_name or ''}\\n")
+    f.write(f"selected_score\\t{best_score if best_score is not None else ''}\\n")
 
 if best_name:
     print(best_name)
