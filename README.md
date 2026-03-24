@@ -27,6 +27,7 @@ TACO was developed at the **Grainger Bioinformatics Center, Field Museum of Natu
   - [Conda Environment](#conda-environment)
   - [Manual Installation (Recommended for Canu and Redundans)](#manual-installation)
 - [Usage](#usage)
+- [Assembly Selection Strategy](#assembly-selection-strategy)
   - [Basic Command](#basic-command)
   - [Parameters](#parameters)
   - [Example Run](#example-run)
@@ -347,3 +348,56 @@ TACO was developed at the Grainger Bioinformatics Center, Field Museum of Natura
 ## Acknowledgements
 
 TACO was developed in the context of genome assembly benchmarking and telomere-aware assembly refinement workflows at the Grainger Bioinformatics Center, Field Museum of Natural History.
+
+
+## Assembly Selection Strategy
+
+When `--choose` is not provided, TACO can automatically select the backbone assembly for final refinement.
+
+### Auto-selection modes
+
+- `smart` (default): biologically informed multi-factor scoring
+- `n50`: legacy behavior using the highest N50 only
+
+### Smart scoring system
+
+TACO ranks assemblies using a composite score that prioritizes biological completeness and chromosome-end support over contiguity alone:
+
+```text
+score =
+  BUSCO_C (%) x 1000
++ Telomere_double_end_contigs x 500
++ Telomere_single_end_contigs x 100
+- Number_of_contigs x 10
++ log10(N50) x 100
+```
+
+### Rationale
+
+- **BUSCO completeness** is the primary driver and strongly favors biologically complete assemblies.
+- **Telomere double-end contigs** provide the strongest evidence for chromosome-level continuity.
+- **Telomere single-end contigs** contribute partial chromosome-end support.
+- **Contig count** penalizes fragmented assemblies.
+- **N50** contributes as a secondary contiguity term rather than dominating selection by itself.
+
+### Example behavior
+
+This scoring strategy prevents assemblies with high N50 but poor completeness from being selected over more biologically complete assemblies with fewer contigs and stronger telomere support.
+
+### Command-line control
+
+```bash
+# Default biologically informed mode
+./TACO.sh --auto-mode smart ...
+
+# Legacy N50-only behavior
+./TACO.sh --auto-mode n50 ...
+```
+
+### Debug output
+
+During automatic selection, TACO reports the values used for scoring for each assembler, for example:
+
+```text
+[DEBUG] canu: BUSCO=97.5 T2T=2 single=1 contigs=56 N50=785256 score=...
+```
