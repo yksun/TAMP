@@ -1303,10 +1303,12 @@ echo "[info] Auto-selection mode: $AUTO_MODE"
 
 if [[ $CHOOSE_FLAG -eq 0 && -z "$assembler" ]]; then
   if [[ ! -s assemblies/assembly_info.csv ]]; then
-    echo "[warn] assemblies/assembly_info.csv missing; cannot auto-select." >&2
+    echo "[warn] assemblies/assembly_info.csv missing or empty; cannot auto-select assembler." >&2
   else
+    echo "[info] Auto-selection mode: ${AUTO_MODE:-smart}"
+    echo "[info] Selection criteria: BUSCO + telomere + contiguity + N50"
 
-    assembler="$(
+assembler="$(
 python3 - <<PY
 import csv, math, sys
 from pathlib import Path
@@ -1329,6 +1331,8 @@ rows = rows[1:]
 busco_row = None
 contig_row = None
 n50_row = None
+t2t_row = None
+single_row = None
 
 for r in rows:
     if not r:
@@ -1341,6 +1345,10 @@ for r in rows:
         contig_row = r
     elif name == "n50":
         n50_row = r
+    elif "telomere double-end contigs" in name:
+        t2t_row = r
+    elif "telomere single-end contigs" in name:
+        single_row = r
 
 best_name = None
 best_score = None
@@ -1358,30 +1366,32 @@ for idx, asm in enumerate(header[1:], start=1):
         try:
             return float(row[idx])
         except:
-            return None
+            return 0.0
 
-    busco = get(busco_row) if busco_row else None
-    contigs = get(contig_row) if contig_row else None
-    n50 = get(n50_row) if n50_row else None
+    busco   = get(busco_row)
+    contigs = get(contig_row)
+    n50     = get(n50_row)
+    t2t     = get(t2t_row)
+    single  = get(single_row)
 
     if mode == "n50":
-        if n50 is None or n50 <= 0:
+        if n50 <= 0:
             continue
         score = n50
 
     else:
-        if busco is None or contigs is None or n50 is None:
-            continue
         if contigs <= 0 or n50 <= 0:
             continue
 
         score = (
             busco * 1000
+            + t2t * 500
+            + single * 100
             - contigs * 10
             + math.log10(n50) * 100
         )
 
-    print(f"[DEBUG] {asm}: BUSCO={busco} contigs={contigs} N50={n50} score={score}", file=sys.stderr)
+    print(f"[DEBUG] {asm}: BUSCO={busco} T2T={t2t} single={single} contigs={contigs} N50={n50} score={score}", file=sys.stderr)
 
     if best_score is None or score > best_score:
         best_name = asm
@@ -1390,7 +1400,7 @@ for idx, asm in enumerate(header[1:], start=1):
 if best_name:
     print(best_name)
 PY
-    )"
+)"
 
     if [[ -n "$assembler" ]]; then
       echo "[info] Auto-selected assembler: $assembler"
