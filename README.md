@@ -53,14 +53,15 @@ TAMP is especially useful when the goal is not only to maximize contiguity, but 
 <a id="features"></a>
 ## Features
 
-- Run multiple assemblers from one workflow.
-- Standardize output FASTA files for direct comparison.
-- Detect telomeric contigs and summarize telomere support.
-- Evaluate assemblies with QUAST and BUSCO.
-- Build a unified `assembly_info.csv` table before final merging.
-- Preserve T2T contigs during final merge.
-- Generate machine-readable benchmark logs for reproducibility.
-- Record software versions and step-by-step logs for each run.
+- run multiple assemblers: HiCanu, NextDenovo, Peregrine, IPA, Flye, and Hifiasm
+- standardize assembly FASTA files for comparison
+- detect telomere-supported contigs from each assembly
+- classify telomere support into strict T2T, single-end telomeric, and telomere-supported contigs
+- evaluate assemblies with QUAST and BUSCO
+- build a combined metrics table for assembly comparison
+- use a selected assembler as the final backbone assembly
+- replace redundant backbone contigs with protected telomere-supported contigs
+- write benchmark logs for reproducibility and manuscript-ready reporting
 
 <a id="workflow"></a>
 ## Workflow
@@ -195,23 +196,23 @@ For fungi with vertebrate-like telomere repeats, such as *Neurospora crassa*, us
 
 TAMP currently implements the following major steps:
 
-1. HiCanu assembly
-2. NextDenovo assembly
-3. Peregrine assembly
-4. IPA assembly
-5. Flye assembly
-6. Hifiasm assembly
-7. Copy and normalize all assemblies
-8. BUSCO on all assemblies
-9. Telomere contig detection and telomere metrics
-10. Merge all assemblies
-11. QUAST for assembler results
-12. Final merge using the selected assembly
-13. BUSCO analysis of final assembly
-14. Telomere analysis of final assembly
-15. QUAST analysis of final assembly
-16. Final comparison report
-17. Cleanup into structured output folders
+1. HiCanu assembly  
+2. NextDenovo assembly  
+3. Peregrine assembly  
+4. IPA assembly  
+5. Flye assembly  
+6. Hifiasm assembly  
+7. Copy and standardize assemblies  
+8. BUSCO on assemblies  
+9. Telomere contig detection and telomere metrics  
+10. Build telomere-supported contig sets from all assemblies  
+11. QUAST on assembler results  
+12. Final assembly refinement with telomere-supported contig replacement  
+13. BUSCO on final assembly  
+14. Telomere analysis on final assembly  
+15. QUAST on final assembly  
+16. Final comparison report  
+17. Cleanup and file organization  
 
 <a id="input-data-recommendations"></a>
 ## Input Data Recommendations
@@ -291,15 +292,28 @@ In practice, the TAMP workflow mainly depends on the subset needed for the speci
 <a id="output-structure"></a>
 ## Output Structure
 
-Typical output files and folders include:
+Main outputs include:
 
-- `assemblies/` — normalized assembly FASTA files and summary tables
-- `logs/` — per-step log files
-- `benchmark_logs/` — machine-readable benchmark and timing outputs
-- `version.txt` — software versions recorded for the run
-- final merged assembly files
-- telomere summary files
-- QUAST and BUSCO result directories
+- `assemblies/` for assembly FASTA files and summary tables
+- `logs/` for per-step logs
+- `benchmark_logs/` for benchmarking and reproducibility logs
+- `version.txt` for software versions
+
+Important telomere-related outputs include:
+
+- `t2t.fasta`
+- `single_tel.fasta`
+- `telomere_supported.fasta`
+- `protected_telomere_contigs.fasta`
+- `protected_telomere_mode.txt`
+- `assemblies/final.merged.fasta`
+
+Summary tables written during the final stages include:
+
+- `assemblies/merged.telo.csv`
+- `assemblies/merged.busco.csv`
+- `assemblies/merged.quast.csv`
+- `merged_result.csv`
 
 <a id="benchmark-logging"></a>
 ## Benchmark Logging
