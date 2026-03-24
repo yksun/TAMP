@@ -1,4 +1,56 @@
 # ------------------------------------------------------------
+# v0.5.0
+# - MAJOR CHANGE (Step 10): Reworked telomere-support classification from seqtk telo
+#   coordinate output. Contigs are now separated into three biologically distinct classes:
+#   strict T2T contigs, single-end telomeric contigs, and combined telomere-supported contigs.
+#
+# - MAJOR CHANGE (Step 10): Preserved the strict meaning of t2t.fasta.
+#   It now contains only true double-end telomere-to-telomere contigs.
+#   Single-end telomeric contigs are written to single_tel.fasta, and the union of both
+#   classes is written to telomere_supported.fasta.
+#
+# - MAJOR CHANGE (Step 10): Added telomere-supported fallback protection for downstream
+#   refinement. The pipeline now writes protected_telomere_contigs.fasta and
+#   protected_telomere_mode.txt so downstream logic can prioritize strict T2T contigs first
+#   and fall back to telomere-supported contigs when no strict T2T contigs are available.
+#
+# - MAJOR CHANGE (Step 12): Replaced merge_wrapper-based final merge logic with
+#   backbone refinement logic. The selected assembler output is now used as the primary
+#   backbone assembly, and redundant backbone contigs are replaced by protected
+#   telomere-supported contigs rather than merged again.
+#
+# - MAJOR CHANGE (Step 12): Updated final assembly refinement to use
+#   protected_telomere_contigs.fasta instead of relying only on t2t_clean.fasta.
+#   Strict T2T contigs are prioritized first; if absent, telomere-supported contigs are used
+#   as the protected replacement set.
+#
+# - CHANGE (Step 12): Improved redundancy filtering between protected telomere contigs
+#   and selected-assembly backbone contigs using minimap2, reducing non-telomeric duplication
+#   while preserving telomere-supported sequence.
+#
+# - CHANGE (Step 12): Renamed Step 12 from "Final merge" to
+#   "Final assembly refinement with telomere-supported contig replacement"
+#   to better reflect the updated pipeline design.
+#
+# - CHANGE (Step 14): Updated final telomere analysis to use the same coordinate-window
+#   logic as Step 10, ensuring consistent reporting of strict T2T and single-end telomeric
+#   contigs between intermediate and final outputs.
+#
+# - CHANGE (Step 16): Updated final telomere metric recomputation to match the new
+#   coordinate-window logic, preventing discrepancies between Step 14 results and the final
+#   comparison table.
+#
+# - CHANGE: Added telomere support summary reporting, including counts of strict T2T,
+#   single-end telomeric, and total telomere-supported contigs, for clearer downstream
+#   interpretation and manuscript reporting.
+#
+# - CHANGE: Improved robustness when no strict T2T contigs are present, preventing empty
+#   FASTA outputs and allowing the pipeline to continue using telomere-supported fallback logic.
+#
+# - DESIGN UPDATE: The final pipeline now follows a protection/replacement strategy rather
+#   than repeated structural merging: telomere-supported contigs are preserved first, and the
+#   best selected assembly is used as a nonredundant backbone.
+# ------------------------------------------------------------
 # v0.30 (2026-03-19)
 # - CHANGE: integrated the former external helper t2t_list.sh as an internal function.
 # - CHANGE: extract_contig_t2t_V3.sh and extract_contig_T_V3.sh are not called by this version, so no external helper scripts are needed for those steps.
