@@ -1,16 +1,16 @@
-<img align="right" src="/docs/tamp-icon.png">
+<img align="right" src="/docs/taco-icon.png">
 
-# TAMP
+# TACO
 
-**Telomere Assembly Merge Pipeline**
+**Telomere-Aware Contig Optimization**
 
-TAMP is a telomere-aware genome assembly workflow for benchmarking, comparing, and merging assemblies into improved chromosome-scale candidates. The pipeline was developed for small eukaryotic genomes, with a focus on fungal genomes and PacBio HiFi reads. It runs multiple assemblers, standardizes their outputs, evaluates assembly quality, detects telomeric contigs, and builds a final merged assembly while protecting telomere-to-telomere (T2T) candidates.
+TACO is a telomere-aware genome assembly workflow for benchmarking, comparing, and refining assemblies into improved chromosome-scale candidates. The pipeline was developed for small eukaryotic genomes, with a focus on fungal genomes and PacBio HiFi reads. It runs multiple assemblers, standardizes their outputs, evaluates assembly quality, detects telomere-supported contigs, and refines a selected backbone assembly by preserving protected telomere-supported contigs while reducing redundant non-telomeric sequence.
 
-TAMP was developed at the **Grainger Bioinformatics Center, Field Museum of Natural History**.
+TACO was developed at the **Grainger Bioinformatics Center, Field Museum of Natural History**.
 
-![Latest Version](https://img.shields.io/github/v/tag/yksun/TAMP?label=Latest%20Version)
-![Last Commit](https://img.shields.io/github/last-commit/yksun/TAMP)
-![Issues](https://img.shields.io/github/issues/yksun/TAMP)
+![Latest Version](https://img.shields.io/github/v/tag/yksun/TACO?label=Latest%20Version)
+![Last Commit](https://img.shields.io/github/last-commit/yksun/TACO)
+![Issues](https://img.shields.io/github/issues/yksun/TACO)
 ![BioConda](https://img.shields.io/badge/BioConda-coming_soon-lightgrey)
 ![Docker](https://img.shields.io/badge/Docker-coming_soon-lightgrey)
 ![Singularity](https://img.shields.io/badge/Singularity-coming_soon-lightgrey)
@@ -44,44 +44,45 @@ TAMP was developed at the **Grainger Bioinformatics Center, Field Museum of Natu
 <a id="overview"></a>
 ## Overview
 
-Genome assemblers often produce different results from the same long-read dataset. One assembler may recover longer contigs, another may preserve more complete chromosome ends, and another may recover better consensus in repeat-rich regions. TAMP was built to make these comparisons systematic and reproducible.
+Genome assemblers often produce different results from the same long-read dataset. One assembler may recover longer contigs, another may preserve more complete chromosome ends, and another may provide a better balance of completeness, contiguity, and redundancy. TACO was built to make these comparisons systematic, interpretable, and reproducible.
 
-The pipeline runs several assemblers, normalizes their outputs, measures assembly quality, detects telomeric contigs, and combines the results into a unified comparison table. It then supports a final merge step that preserves telomere-to-telomere contigs and reduces redundancy among the remaining contigs.
+Rather than focusing only on recovering strict telomere-to-telomere (T2T) contigs, TACO is designed as a multi-assembler decision and refinement workflow. It runs several assemblers, normalizes their outputs, summarizes assembly quality metrics, detects telomere-supported contigs, and builds a unified comparison table so users can decide which assembler performs best for their dataset.
 
-TAMP is especially useful when the goal is not only to maximize contiguity, but also to recover biologically meaningful chromosome-end structure.
+TACO then refines the selected backbone assembly by prioritizing protected telomere-supported contigs, including strict T2T contigs when present, while reducing redundant non-telomeric sequence. This makes the pipeline useful both for assembler comparison and for improving chromosome-end representation in the final assembly.
 
 <a id="features"></a>
 ## Features
 
-- Run multiple assemblers from one workflow.
-- Standardize output FASTA files for direct comparison.
-- Detect telomeric contigs and summarize telomere support.
-- Evaluate assemblies with QUAST and BUSCO.
-- Build a unified `assembly_info.csv` table before final merging.
-- Preserve T2T contigs during final merge.
-- Generate machine-readable benchmark logs for reproducibility.
-- Record software versions and step-by-step logs for each run.
+- Run multiple long-read assemblers from one workflow.
+- Standardize assembly outputs for direct comparison across assemblers.
+- Benchmark assemblies with QUAST, BUSCO, and telomere-support summaries.
+- Build a unified `assembly_info.csv` table to support assembler selection.
+- Separate strict T2T contigs from single-end telomeric contigs.
+- Preserve protected telomere-supported contigs during final backbone refinement.
+- Reduce redundant non-telomeric contigs while retaining chromosome-end support.
+- Generate machine-readable benchmark logs and software version records for reproducibility.
 
 <a id="workflow"></a>
 ## Workflow
 
-TAMP follows this high-level order:
+TACO follows this high-level order:
 
-1. Run one or more assemblers.
-2. Normalize assembly outputs and contig names.
-3. Detect telomeric contigs for each assembly.
+1. Run one or more assemblers on the same long-read dataset.
+2. Normalize assembly outputs and contig names for comparison.
+3. Detect telomere-supported contigs for each assembly.
 4. Evaluate assemblies with QUAST and BUSCO.
-5. Build a combined summary table across assemblies.
-6. Select a preferred assembly for the final merge.
-7. Preserve T2T contigs and merge non-T2T contigs.
-8. Run final telomere checks, final BUSCO/QUAST, and summary reporting.
+5. Build a combined summary table across assemblies to support assembler choice.
+6. Select a preferred backbone assembly based on the comparison results.
+7. Build a telomere-supported contig pool from all assemblies.
+8. Refine the selected backbone by replacing redundant backbone contigs with protected telomere-supported contigs.
+9. Run final telomere checks, final BUSCO/QUAST, and summary reporting.
 
-A schematic workflow figure can be added in `docs/` and linked here when ready.
+A schematic workflow figure should emphasize three concepts: multi-assembler benchmarking, telomere-supported contig classification, and backbone refinement by protected contig replacement. Place the updated TACO figure in `docs/taco-workflow.png` or `docs/taco-icon.png` and link it here when ready.
 
 <a id="installation"></a>
 ## Installation
 
-TAMP uses a primary Conda or Micromamba environment for most tools. At present, **Redundans is installed manually** because of dependency conflicts with the modern Conda stack used by other tools. **Canu may also be installed manually** if your local package resolution selects an unstable development build or if your environment has persistent solver conflicts.
+TACO uses a primary Conda or Micromamba environment for most tools. At present, **Redundans is installed manually** because of dependency conflicts with the modern Conda stack used by other tools. **Canu may also be installed manually** if your local package resolution selects an unstable development build or if your environment has persistent solver conflicts.
 
 <a id="conda-environment"></a>
 ### Conda Environment
@@ -106,17 +107,17 @@ If you use the provided installer:
 bash install_tamp.sh
 ```
 
-The installer is intended to place TAMP under `~/opt/TAMP` by default and create launchers in `~/opt/bin`.
+The installer is intended to place TACO under `~/opt/TACO` by default and create launchers in `~/opt/bin`.
 
 <a id="manual-installation"></a>
 ### Manual Installation (Recommended for Canu and Redundans)
 
 #### Redundans
 
-Clone and install Redundans manually inside the TAMP installation directory:
+Clone and install Redundans manually inside the TACO installation directory:
 
 ```bash
-cd ~/opt/TAMP
+cd ~/opt/TACO
 git clone --recursive https://github.com/Gabaldonlab/redundans.git
 cd redundans
 bash INSTALL.sh
@@ -152,10 +153,10 @@ export PATH="$HOME/opt/canu-2.3/build/bin:$PATH"
 <a id="basic-command"></a>
 ### Basic Command
 
-Run TAMP in a dedicated working directory and provide the input FASTQ file by absolute path:
+Run TACO in a dedicated working directory and provide the input FASTQ file by absolute path:
 
 ```bash
-TAMP.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG
+TACO.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG
 ```
 
 <a id="parameters"></a>
@@ -178,13 +179,13 @@ TAMP.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG
 For *Saccharomyces cerevisiae* PacBio HiFi data:
 
 ```bash
-mkdir -p ~/Storage/projects/TAMP/SRR13577847
-cd ~/Storage/projects/TAMP/SRR13577847
+mkdir -p ~/Storage/projects/TACO/SRR13577847
+cd ~/Storage/projects/TACO/SRR13577847
 
-TAMP.sh \
+TACO.sh \
   -g 12m \
   -t 16 \
-  --fastq ~/Storage/projects/TAMP/data/SRR13577847.fastq \
+  --fastq ~/Storage/projects/TACO/data/SRR13577847.fastq \
   -m TGTG
 ```
 
@@ -193,7 +194,7 @@ For fungi with vertebrate-like telomere repeats, such as *Neurospora crassa*, us
 <a id="pipeline-steps"></a>
 ## Pipeline Steps
 
-TAMP currently implements the following major steps:
+TACO currently implements the following major steps:
 
 1. HiCanu assembly
 2. NextDenovo assembly
@@ -204,9 +205,9 @@ TAMP currently implements the following major steps:
 7. Copy and normalize all assemblies
 8. BUSCO on all assemblies
 9. Telomere contig detection and telomere metrics
-10. Merge all assemblies
+10. Build a telomere-supported contig pool across assemblies
 11. QUAST for assembler results
-12. Final merge using the selected assembly
+12. Final assembly refinement with telomere-supported contig replacement
 13. BUSCO analysis of final assembly
 14. Telomere analysis of final assembly
 15. QUAST analysis of final assembly
@@ -216,7 +217,7 @@ TAMP currently implements the following major steps:
 <a id="input-data-recommendations"></a>
 ## Input Data Recommendations
 
-TAMP is best suited to long-read data, especially PacBio HiFi reads, for small eukaryotic genomes. For publication-quality benchmarking:
+TACO is best suited to long-read data, especially PacBio HiFi reads, for small eukaryotic genomes. For publication-quality benchmarking:
 
 - Use public datasets with stable accession numbers.
 - Report the source of all third-party datasets.
@@ -266,7 +267,7 @@ The main environment is expected to provide:
 
 #### Redundans requirements
 
-Redundans can use several external tools. Not all of them are required for every TAMP run, but the upstream software lists the following resources:
+Redundans can use several external tools. Not all of them are required for every TACO run, but the upstream software lists the following resources:
 
 - Python
 - Platanus
@@ -286,7 +287,7 @@ Redundans can use several external tools. Not all of them are required for every
 - scales
 - argparse for R
 
-In practice, the TAMP workflow mainly depends on the subset needed for the specific Redundans operations invoked during the final merge.
+In practice, the TACO workflow mainly depends on the subset needed for the specific Redundans operations invoked during the final merge.
 
 <a id="output-structure"></a>
 ## Output Structure
@@ -304,7 +305,7 @@ Typical output files and folders include:
 <a id="benchmark-logging"></a>
 ## Benchmark Logging
 
-TAMP writes benchmark-oriented logs to support reproducible testing and publication reporting. These can include:
+TACO writes benchmark-oriented logs to support reproducible testing and publication reporting. These can include:
 
 - `benchmark_logs/run_metadata.tsv`
 - `benchmark_logs/step_benchmark.tsv`
@@ -331,18 +332,18 @@ export MAMBA_ROOT_PREFIX="$HOME/.local/share/mamba"
 
 Do not assume the same motif for all fungi. Choose a motif or seed motif appropriate for the target organism.
 
-### `TAMP.sh: command not found`
+### `TACO.sh: command not found`
 
-Add the install directory or launcher directory to your `PATH`, or run TAMP using the full path.
+Add the install directory or launcher directory to your `PATH`, or run TACO using the full path.
 
 <a id="citation-and-archiving"></a>
 ## Citation and Archiving
 
-If you use TAMP in a publication, please cite the software and archive the exact release used for the analysis in a persistent public repository such as Zenodo. Citing the archived release helps ensure that the software version used in the study remains accessible and reproducible.
+If you use TACO in a publication, please cite the software and archive the exact release used for the analysis in a persistent public repository such as Zenodo. Citing the archived release helps ensure that the software version used in the study remains accessible and reproducible.
 
-TAMP was developed at the Grainger Bioinformatics Center, Field Museum of Natural History, Chicago, Illinois, USA.
+TACO was developed at the Grainger Bioinformatics Center, Field Museum of Natural History, Chicago, Illinois, USA.
 
 <a id="acknowledgements"></a>
 ## Acknowledgements
 
-TAMP was developed in the context of genome assembly benchmarking and telomere-aware merging workflows at the Grainger Bioinformatics Center, Field Museum of Natural History.
+TACO was developed in the context of genome assembly benchmarking and telomere-aware assembly refinement workflows at the Grainger Bioinformatics Center, Field Museum of Natural History.
