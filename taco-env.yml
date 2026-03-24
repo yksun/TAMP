@@ -1,4 +1,4 @@
-name: tamp
+name: taco
 channels:
   - conda-forge
   - bioconda
@@ -9,7 +9,7 @@ dependencies:
   # assemblers
   - canu
   - nextdenovo
-  - peregrine-2021
+  - peregrine
   - pbipa
   - flye
   - hifiasm

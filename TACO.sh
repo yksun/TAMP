@@ -181,7 +181,7 @@ run_busco=false
 busco_lineage="ascomycota_odb10"
 
 # --- Logging & versioning ---
-PIPELINE_NAME="TAMP-0.5.0.sh"
+PIPELINE_NAME="TACO-0.5.0.sh"
 RUN_ID="$(date +'%Y%m%d_%H%M%S')"
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
@@ -640,7 +640,7 @@ check_single_env_requirements() {
   fi
   if [[ ${#missing[@]} -gt 0 ]]; then
     echo "[error] Missing tools in the active conda environment: ${missing[*]}" >&2
-    echo "[error] Create and activate the unified TAMP environment first, then rerun the pipeline." >&2
+    echo "[error] Create and activate the unified TACO environment first, then rerun the pipeline." >&2
     exit 127
   fi
 }
