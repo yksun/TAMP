@@ -1,4 +1,29 @@
 # ------------------------------------------------------------
+# v0.5.1
+# - FIX (Step 12): Unified argument parsing for --choose and --auto-mode to prevent
+#   auto-mode from being ignored during final backbone selection.
+# - CHANGE (Step 12): Added Merqury pre-selection evaluation for all available assembler
+#   outputs when merqury.sh and a .meryl database are present.
+# - CHANGE (Step 12): Added Merqury-derived metrics (QV and completeness) to
+#   assemblies/assembly.merqury.csv and integrated them into assemblies/assembly_info.csv.
+# - CHANGE (Step 12): Updated automatic backbone scoring to include BUSCO completeness,
+#   telomere support, Merqury completeness, Merqury QV, contig count, and N50.
+# - CHANGE (Step 12): Added selection_debug.tsv and selection_decision.txt for transparent
+#   scoring, reproducibility, and reporting of backbone selection.
+# - FIX (Step 12): Improved telomere rescue logic for single-end telomeric contigs by using
+#   terminal overhang rather than whole-contig length differences.
+# - FIX (Step 12): Added post-rescue deduplication against protected telomere contigs to
+#   reduce redundancy before final assembly construction.
+# - CHANGE (Step 16): Added final Merqury evaluation for assemblies/final.merged.fasta and
+#   wrote assemblies/merged.merqury.csv for final assembly comparison.
+# - CHANGE (Step 16): Renamed the final comparison table output to
+#   final_results/final_result.csv and expanded it to include Merqury metrics,
+#   selection score, selected assembler, auto-selection mode, and scoring formula.
+# - FIX (Step 17): Updated cleanup to preserve new final outputs, including
+#   merged.merqury.csv, selection_debug.tsv, selection_decision.txt, and final_result.csv.
+# - CHANGE: TACO now supports telomere-aware backbone refinement with optional
+#   k-mer-based assembly quality scoring through Merqury.
+# ------------------------------------------------------------
 # v0.5.0
 # - MAJOR CHANGE (Step 10): Reworked telomere-support classification from seqtk telo
 #   coordinate output. Contigs are now separated into three biologically distinct classes:

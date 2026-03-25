@@ -24,6 +24,9 @@ dependencies:
   # evaluation
   - busco
   - quast
+  - merqury
+  - meryl
+  
 
   # misc tools used in pipeline
   - funannotate
