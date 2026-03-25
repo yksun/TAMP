@@ -1090,8 +1090,7 @@ PY
               next
             }
             {
-              gsub(/[ 	
-]/,"")
+              gsub(/[ \t\r\n]/,"")
               seq=seq $0
             }
             END {
@@ -1162,9 +1161,54 @@ PY
 
       t2t_list_inline -i allmerged.telo.list -o t2t.list -s single_tel.list -u telomere_supported.list
 
-      extract_by_list t2t.list allmerged_telo_sort.fasta t2t.fasta
-      extract_by_list single_tel.list allmerged_telo_sort.fasta single_tel.fasta
-      extract_by_list telomere_supported.list allmerged_telo_sort.fasta telomere_supported.fasta
+      # Robust inline extraction instead of extract_by_list()
+      awk '
+        BEGIN {
+          while ((getline < LIST) > 0) {
+            gsub(/\r/, "", $0)
+            if ($0 != "") ids[$1] = 1
+          }
+          close(LIST)
+        }
+        /^>/ {
+          h = substr($0, 2)
+          sub(/[ \t].*$/, "", h)
+          keep = (h in ids)
+        }
+        keep
+      ' LIST="t2t.list" allmerged_telo_sort.fasta > t2t.fasta
+
+      awk '
+        BEGIN {
+          while ((getline < LIST) > 0) {
+            gsub(/\r/, "", $0)
+            if ($0 != "") ids[$1] = 1
+          }
+          close(LIST)
+        }
+        /^>/ {
+          h = substr($0, 2)
+          sub(/[ \t].*$/, "", h)
+          keep = (h in ids)
+        }
+        keep
+      ' LIST="single_tel.list" allmerged_telo_sort.fasta > single_tel.fasta
+
+      awk '
+        BEGIN {
+          while ((getline < LIST) > 0) {
+            gsub(/\r/, "", $0)
+            if ($0 != "") ids[$1] = 1
+          }
+          close(LIST)
+        }
+        /^>/ {
+          h = substr($0, 2)
+          sub(/[ \t].*$/, "", h)
+          keep = (h in ids)
+        }
+        keep
+      ' LIST="telomere_supported.list" allmerged_telo_sort.fasta > telomere_supported.fasta
 
       if [[ -s single_tel.fasta ]] && command -v minimap2 >/dev/null 2>&1; then
         echo "[INFO] Optimizing single-end telomeric pool by redundancy reduction"
@@ -1218,7 +1262,7 @@ def union(a, b):
 for ln in open(paf):
     if not ln.strip() or ln.startswith("#"):
         continue
-    p = ln.rstrip().split("	")
+    p = ln.rstrip().split("\t")
     if len(p) < 12:
         continue
 
@@ -1247,23 +1291,34 @@ for n in names:
 
 best = []
 with open(out_tsv, "w") as o:
-    o.write("cluster_id	representative	members
-")
+    o.write("cluster_id\trepresentative\tmembers\n")
     for cid, members in sorted(clusters.items()):
         members = sorted(members, key=lambda x: (len(seqs[x]), x), reverse=True)
         rep = members[0]
         best.append(rep)
-        o.write(f"{cid}	{rep}	{','.join(members)}
-")
+        o.write(f"{cid}\t{rep}\t{','.join(members)}\n")
 
 with open(out_ids, "w") as o:
     for n in sorted(best):
-        o.write(n + "
-")
+        o.write(n + "\n")
 PY
         check_command
 
-        extract_by_list single_tel_best.ids single_tel.fasta single_tel_best.fasta
+        awk '
+          BEGIN {
+            while ((getline < LIST) > 0) {
+              gsub(/\r/, "", $0)
+              if ($0 != "") ids[$1] = 1
+            }
+            close(LIST)
+          }
+          /^>/ {
+            h = substr($0, 2)
+            sub(/[ \t].*$/, "", h)
+            keep = (h in ids)
+          }
+          keep
+        ' LIST="single_tel_best.ids" single_tel.fasta > single_tel_best.fasta
       else
         cp -f single_tel.fasta single_tel_best.fasta 2>/dev/null || : > single_tel_best.fasta
       fi
@@ -2546,15 +2601,17 @@ PY
 
       python3 - <<'PY'
 import os, csv, re
+
 qv_file = os.path.join("merqury", "final.qv")
 comp_file = os.path.join("merqury", "final.completeness.stats")
+
 def parse_first_float(path):
     if not os.path.exists(path):
         return ""
     txt = open(path, "r", errors="ignore").read()
     patterns = [
-        r'(?i)qv[^0-9]*([0-9]+(?:\.[0-9]+)?)',
-        r'(?i)completeness[^0-9]*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)\bqv\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)\bcompleteness\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
         r'([0-9]+(?:\.[0-9]+)?)'
     ]
     for pat in patterns:
@@ -2562,124 +2619,197 @@ def parse_first_float(path):
         if m:
             return m.group(1)
     return ""
-qv = parse_first_float(qv_file); comp = parse_first_float(comp_file)
+
+qv = parse_first_float(qv_file)
+comp = parse_first_float(comp_file)
+
 with open("assemblies/merged.merqury.csv", "w", newline="") as f:
-    csv.writer(f).writerows([["Metric","merged"],["Merqury QV",qv],["Merqury completeness (%)",comp]])
+    csv.writer(f).writerows([
+        ["Metric", "merged"],
+        ["Merqury QV", qv],
+        ["Merqury completeness (%)", comp],
+    ])
+
 print("Wrote assemblies/merged.merqury.csv")
 PY
+      check_command
 
       python3 - <<'PY'
 import os, csv
 from collections import OrderedDict
+
 TEL_WINDOW = int(os.getenv("TEL_WINDOW", "100"))
-FINAL_FILES=[("telo","assemblies/merged.telo.csv"),("busco","assemblies/merged.busco.csv"),("quast","assemblies/merged.quast.csv"),("merqury","assemblies/merged.merqury.csv")]
-ASM_INFO="assemblies/assembly_info.csv"
-DECISION_FILE="assemblies/selection_decision.txt"
-OUT="final_results/final_result.csv"
+FINAL_FILES = [
+    ("telo", "assemblies/merged.telo.csv"),
+    ("busco", "assemblies/merged.busco.csv"),
+    ("quast", "assemblies/merged.quast.csv"),
+    ("merqury", "assemblies/merged.merqury.csv"),
+]
+ASM_INFO = "assemblies/assembly_info.csv"
+DECISION_FILE = "assemblies/selection_decision.txt"
+OUT = "final_results/final_result.csv"
+
 def read_metric_merged(path):
-    rows=[]
-    if not os.path.exists(path): return rows
-    with open(path,newline="") as f:
-        r=csv.reader(f); hdr=next(r,None)
-        if not hdr or len(hdr)<2: return rows
-        idx_metric=0; idx_merged=1
-        for i,h in enumerate(hdr):
-            name=(h or "").strip().lower()
-            if name=="metric": idx_metric=i
-            if name=="merged": idx_merged=i
+    rows = []
+    if not os.path.exists(path):
+        return rows
+    with open(path, newline="") as f:
+        r = csv.reader(f)
+        hdr = next(r, None)
+        if not hdr or len(hdr) < 2:
+            return rows
+        idx_metric = 0
+        idx_merged = 1
+        for i, h in enumerate(hdr):
+            name = (h or "").strip().lower()
+            if name == "metric":
+                idx_metric = i
+            if name == "merged":
+                idx_merged = i
         for row in r:
-            if not row: continue
-            m=(row[idx_metric] if idx_metric < len(row) else "").strip()
-            v=(row[idx_merged] if idx_merged < len(row) else "").strip()
-            if m: rows.append((m,v))
+            if not row:
+                continue
+            m = (row[idx_metric] if idx_metric < len(row) else "").strip()
+            v = (row[idx_merged] if idx_merged < len(row) else "").strip()
+            if m:
+                rows.append((m, v))
     return rows
+
 def read_assembly_info(path):
-    if not os.path.exists(path): return None,None
-    with open(path,newline="") as f:
-        r=csv.reader(f); hdr=next(r,None)
-        if not hdr: return None,None
-        hdr=list(hdr); hdr[0]="Metric"; body=[row for row in r if row]
-    return hdr,body
+    if not os.path.exists(path):
+        return None, None
+    with open(path, newline="") as f:
+        r = csv.reader(f)
+        hdr = next(r, None)
+        if not hdr:
+            return None, None
+        hdr = list(hdr)
+        hdr[0] = "Metric"
+        body = [row for row in r if row]
+    return hdr, body
+
 def compute_telo_counts(list_path, tel_window=100):
     try:
-        s={}; e={}
-        with open(list_path,'r',newline='') as f:
+        s = {}
+        e = {}
+        with open(list_path, "r", newline="") as f:
             for line in f:
-                line=line.strip().replace('
-','')
-                if not line: continue
-                parts=line.split()
-                if len(parts)<4: continue
-                c=parts[0]
+                line = line.strip().replace('\r', '')
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                c = parts[0]
                 try:
-                    a=int(parts[1]); b=int(parts[2]); L=int(parts[3])
+                    a = int(parts[1])
+                    b = int(parts[2])
+                    L = int(parts[3])
                 except ValueError:
                     continue
-                has_left=(a <= tel_window); has_right=((L-b) <= tel_window)
-                s[c]=1 if has_left else 0; e[c]=1 if has_right else 0
-        keys=set(s)|set(e); double=sum(1 for k in keys if s.get(k,0)>0 and e.get(k,0)>0); single=sum(1 for k in keys if (s.get(k,0)+e.get(k,0))==1); total=double+single
-        return str(double),str(single),str(total)
+                has_left = (a <= tel_window)
+                has_right = ((L - b) <= tel_window)
+                s[c] = 1 if has_left else 0
+                e[c] = 1 if has_right else 0
+
+        keys = set(s) | set(e)
+        double = sum(1 for k in keys if s.get(k, 0) > 0 and e.get(k, 0) > 0)
+        single = sum(1 for k in keys if (s.get(k, 0) + e.get(k, 0)) == 1)
+        total = double + single
+        return str(double), str(single), str(total)
     except Exception:
         return None
+
 def count_fasta(path):
     try:
-        with open(path) as f: return str(sum(1 for ln in f if ln.startswith(">")))
-    except Exception: return ""
-final_map=OrderedDict(); order_seen=[]
-for _,p in FINAL_FILES:
-    for m,v in read_metric_merged(p):
-        if m not in final_map: order_seen.append(m)
-        final_map[m]=v
-_tcounts=compute_telo_counts("assemblies/final.telo.list", TEL_WINDOW)
+        with open(path) as f:
+            return str(sum(1 for ln in f if ln.startswith(">")))
+    except Exception:
+        return ""
+
+final_map = OrderedDict()
+for _, p in FINAL_FILES:
+    for m, v in read_metric_merged(p):
+        final_map[m] = v
+
+_tcounts = compute_telo_counts("assemblies/final.telo.list", TEL_WINDOW)
 if _tcounts is not None:
-    _d,_s,_t=_tcounts
-    final_map["Telomere double-end contigs"]=_d
-    final_map["Telomere single-end contigs"]=_s
-    final_map["Telomere-supported contigs"]=_t
+    _d, _s, _t = _tcounts
+    final_map["Telomere double-end contigs"] = _d
+    final_map["Telomere single-end contigs"] = _s
+    final_map["Telomere-supported contigs"] = _t
+
 if os.path.exists(DECISION_FILE):
     with open(DECISION_FILE) as f:
         for line in f:
-            line=line.rstrip("
-")
-            if not line: continue
-            k,*rest=line.split("	",1); v=rest[0] if rest else ""
-            if k=="selected_score": final_map["Selection score"]=v
-            elif k=="selected_assembler": final_map["Selected assembler"]=v
-            elif k=="auto_mode": final_map["Auto-selection mode"]=v
-            elif k=="score_formula": final_map["Score formula"]=v
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            k, *rest = line.split("\t", 1)
+            v = rest[0] if rest else ""
+            if k == "selected_score":
+                final_map["Selection score"] = v
+            elif k == "selected_assembler":
+                final_map["Selected assembler"] = v
+            elif k == "auto_mode":
+                final_map["Auto-selection mode"] = v
+            elif k == "score_formula":
+                final_map["Score formula"] = v
+
 if os.path.exists("protected_telomere_mode.txt"):
-    final_map["Protected telomere mode"]=open("protected_telomere_mode.txt").read().strip()
-final_map["Step10 strict T2T pool contigs"]=count_fasta("t2t_clean.fasta")
-final_map["Step10 best single-end telomere pool contigs"]=count_fasta("single_tel_best_clean.fasta")
-final_map["Step10 optimized telomere-supported pool contigs"]=count_fasta("telomere_supported_best_clean.fasta")
+    with open("protected_telomere_mode.txt") as f:
+        final_map["Protected telomere mode"] = f.read().strip()
+
+final_map["Step10 strict T2T pool contigs"] = count_fasta("t2t_clean.fasta")
+final_map["Step10 best single-end telomere pool contigs"] = count_fasta("single_tel_best_clean.fasta")
+final_map["Step10 optimized telomere-supported pool contigs"] = count_fasta("telomere_supported_best_clean.fasta")
+
 try:
     with open("assemblies/single_tel.replaced.ids") as f:
-        final_map["Step12 rescued telomere replacements"]=str(sum(1 for _ in f))
+        final_map["Step12 rescued telomere replacements"] = str(sum(1 for _ in f))
 except Exception:
-    final_map["Step12 rescued telomere replacements"]=""
-hdr,body=read_assembly_info(ASM_INFO)
+    final_map["Step12 rescued telomere replacements"] = ""
+
+hdr, body = read_assembly_info(ASM_INFO)
+
 if hdr is not None:
-    hdr_out=list(hdr)+(["merged"] if "merged" not in [h.lower() for h in hdr] else [])
-    out_rows=[]
+    hdr_out = list(hdr)
+    if "merged" not in [h.lower() for h in hdr]:
+        hdr_out.append("merged")
+
+    out_rows = []
     for row in body:
-        if len(row) < len(hdr_out)-1: row = row + [""]*(len(hdr_out)-1-len(row))
-        metric=(row[0] if row else "").strip()
-        out_rows.append(row + [final_map.get(metric,"")])
-    present_metrics=set(r[0].strip() for r in body if r and r[0].strip())
-    for m in final_map.keys():
+        base_row = row[:]
+        while len(base_row) < len(hdr_out) - 1:
+            base_row.append("")
+        metric = (base_row[0] if base_row else "").strip()
+        out_rows.append(base_row + [final_map.get(metric, "")])
+
+    present_metrics = set(r[0].strip() for r in body if r and r[0].strip())
+    for m, v in final_map.items():
         if m not in present_metrics:
-            r=[""]*len(hdr_out); r[0]=m; r[-1]=final_map.get(m,""); out_rows.append(r)
-    with open(OUT,"w",newline="") as f:
-        w=csv.writer(f); w.writerow(hdr_out); w.writerows(out_rows)
+            r = [""] * len(hdr_out)
+            r[0] = m
+            r[-1] = v
+            out_rows.append(r)
+
+    with open(OUT, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(hdr_out)
+        w.writerows(out_rows)
 else:
-    with open(OUT,"w",newline="") as f:
-        w=csv.writer(f); w.writerow(["Metric","merged"])
-        for m,v in final_map.items(): w.writerow([m,v])
+    with open(OUT, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["Metric", "merged"])
+        for m, v in final_map.items():
+            w.writerow([m, v])
+
 print(f"Wrote {OUT}")
 PY
+      check_command
+
       echo "[ok] Wrote final_results/final_result.csv"
       ;;
-
     17)
       echo "Step 17 - Cleanup temporary files"
 
