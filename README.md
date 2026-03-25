@@ -4,7 +4,7 @@
 
 **Telomere-Aware Contig Optimization**
 
-TACO is a telomere-aware genome assembly workflow for benchmarking, comparing, and refining assemblies into improved chromosome-scale candidates. The pipeline was developed for small eukaryotic genomes, with a focus on fungal genomes and PacBio HiFi reads. It runs multiple assemblers, standardizes their outputs, evaluates assembly quality, detects telomere-supported contigs, and refines a selected backbone assembly by preserving protected telomere-supported contigs while reducing redundant non-telomeric sequence.
+TACO is a telomere-aware **all-in-one multi-assembler comparison and refinement pipeline** for genome assembly benchmarking, decision-making, and chromosome-end improvement. The pipeline was developed for small eukaryotic genomes, with a focus on fungal genomes and PacBio HiFi reads. It runs multiple assemblers, standardizes their outputs, evaluates assembly quality, detects telomere-supported contigs, and can either: **(1)** stop after generating a unified assembler comparison table for convenient benchmarking, or **(2)** continue into telomere-aware backbone refinement for an improved chromosome-scale candidate assembly.
 
 TACO was developed at the **Grainger Bioinformatics Center, Field Museum of Natural History**.
 
@@ -19,7 +19,6 @@ TACO was developed at the **Grainger Bioinformatics Center, Field Museum of Natu
 
 <a id="table-of-contents"></a>
 ## Table of Contents
-
 - [Overview](#overview)
 - [Features](#features)
 - [Workflow](#workflow)
@@ -27,10 +26,12 @@ TACO was developed at the **Grainger Bioinformatics Center, Field Museum of Natu
   - [Conda Environment](#conda-environment)
   - [Manual Installation (Recommended for Canu and Redundans)](#manual-installation)
 - [Usage](#usage)
-- [Assembly Selection Strategy](#assembly-selection-strategy)
   - [Basic Command](#basic-command)
+  - [Assembly-only Mode](#assembly-only-mode)
   - [Parameters](#parameters)
+  - [Parameter Details](#parameter-details)
   - [Example Run](#example-run)
+- [Assembly Selection Strategy](#assembly-selection-strategy)
 - [Pipeline Steps](#pipeline-steps)
 - [Input Data Recommendations](#input-data-recommendations)
 - [Dependencies](#dependencies)
@@ -47,18 +48,20 @@ TACO was developed at the **Grainger Bioinformatics Center, Field Museum of Natu
 
 Genome assemblers often produce different results from the same long-read dataset. One assembler may recover longer contigs, another may preserve more complete chromosome ends, and another may provide a better balance of completeness, contiguity, and redundancy. TACO was built to make these comparisons systematic, interpretable, and reproducible.
 
-Rather than focusing only on recovering strict telomere-to-telomere (T2T) contigs, TACO is designed as a multi-assembler decision and refinement workflow. It runs several assemblers, normalizes their outputs, summarizes assembly quality metrics, detects telomere-supported contigs, and builds a unified comparison table so users can decide which assembler performs best for their dataset.
+Rather than focusing only on recovering strict telomere-to-telomere (T2T) contigs, TACO is designed as a multi-assembler decision and refinement workflow. It runs several assemblers, normalizes their outputs, summarizes assembly quality metrics, detects telomere-supported contigs, and builds a unified comparison table so users can decide which assembler performs best for their dataset. This makes TACO useful not only as a merge/refinement workflow, but also as a convenient **all-in-one assembler comparison pipeline**.
 
-TACO then refines the selected backbone assembly by prioritizing protected telomere-supported contigs, including strict T2T contigs when present, while reducing redundant non-telomeric sequence. This makes the pipeline useful both for assembler comparison and for improving chromosome-end representation in the final assembly.
+TACO can then refine the selected backbone assembly by prioritizing protected telomere-supported contigs, including strict T2T contigs when present, while reducing redundant non-telomeric sequence. In other words, users can treat TACO as either a comparison-first workflow or a comparison-plus-refinement workflow, depending on whether `--assembly-only` is used.
 
 <a id="features"></a>
 ## Features
 
 - Run multiple long-read assemblers from one workflow.
 - Standardize assembly outputs for direct comparison across assemblers.
-- Benchmark assemblies with QUAST, BUSCO, and telomere-support summaries.
-- Build a unified `assembly_info.csv` table to support assembler selection.
+- Benchmark assemblies with QUAST, BUSCO, telomere-support summaries, and optional Merqury.
+- Build a unified `assemblies/assembly_info.csv` table for convenient assembler comparison.
+- Support an **assembly-only mode** for users who want benchmarking and comparison without refinement.
 - Separate strict T2T contigs from single-end telomeric contigs.
+- Build an optimized telomere pool before final refinement.
 - Preserve protected telomere-supported contigs during final backbone refinement.
 - Reduce redundant non-telomeric contigs while retaining chromosome-end support.
 - Generate machine-readable benchmark logs and software version records for reproducibility.
@@ -71,14 +74,22 @@ TACO follows this high-level order:
 1. Run one or more assemblers on the same long-read dataset.
 2. Normalize assembly outputs and contig names for comparison.
 3. Detect telomere-supported contigs for each assembly.
-4. Evaluate assemblies with QUAST and BUSCO.
+4. Evaluate assemblies with QUAST, BUSCO, and optional Merqury.
 5. Build a combined summary table across assemblies to support assembler choice.
+
+At this point, the workflow can branch:
+
+- **Assembly-only mode (`--assembly-only`)**: stop after benchmarking and write `assemblies/assembly_info.csv` as the main comparison table.
+- **Full refinement mode**: continue into telomere-pool optimization and final backbone refinement.
+
+Full refinement mode then continues with:
+
 6. Select a preferred backbone assembly based on the comparison results.
-7. Build a telomere-supported contig pool from all assemblies.
-8. Refine the selected backbone by replacing redundant backbone contigs with protected telomere-supported contigs.
+7. Build an optimized telomere pool from all assemblies.
+8. Refine the selected backbone by replacing redundant backbone contigs with protected telomere-supported contigs and rescuing useful telomeric ends.
 9. Run final telomere checks, final BUSCO/QUAST, and summary reporting.
 
-A schematic workflow figure should emphasize three concepts: multi-assembler benchmarking, telomere-supported contig classification, and backbone refinement by protected contig replacement. Place the updated TACO figure in `docs/taco-workflow.png` or `docs/taco-icon.png` and link it here when ready.
+A schematic workflow figure should emphasize four concepts: multi-assembler benchmarking, assembly-only comparison mode, telomere-supported contig classification, and backbone refinement by protected contig replacement. Place the updated TACO figure in `docs/taco-workflow.png` or `docs/taco-icon.png` and link it here when ready.
 
 <a id="installation"></a>
 ## Installation
@@ -154,11 +165,57 @@ export PATH="$HOME/opt/canu-2.3/build/bin:$PATH"
 <a id="basic-command"></a>
 ### Basic Command
 
-Run TACO in a dedicated working directory and provide the input FASTQ file by absolute path:
+Run TACO in a dedicated working directory and provide the input FASTQ file by absolute path.
+
+**Most users will use TACO in one of two ways:**
+
+1. **Assembler comparison only** with `--assembly-only`, when the main goal is to compare assemblers and produce `assemblies/assembly_info.csv`.
+2. **Full telomere-aware refinement**, when the goal is to compare assemblers and then build a final refined assembly.
+
+#### Full refinement run
 
 ```bash
 TACO.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG
 ```
+
+#### Assembly-only comparison run
+
+```bash
+TACO.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG --assembly-only
+```
+
+#### Assembly-only comparison with Merqury
+
+```bash
+TACO.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG --assembly-only --merqury-db reads.meryl
+```
+
+<a id="assembly-only-mode"></a>
+### Assembly-only Mode
+
+Use `--assembly-only` when you want TACO primarily as an **all-in-one assembler comparison pipeline**.
+
+In this mode, TACO runs the assembler generation and comparison steps, including:
+- assembler execution
+- assembly standardization
+- BUSCO
+- telomere summaries
+- QUAST
+- optional Merqury for all assemblies
+
+It then writes the combined comparison table to:
+
+- `assemblies/assembly_info.csv`
+
+and a copied summary table to:
+
+- `final_results/assembly_only_result.csv`
+
+This mode is especially useful when you want to:
+- benchmark multiple assemblers on the same dataset,
+- decide which assembler is best before doing any refinement,
+- or use TACO mainly as a convenient one-command comparison workflow.
+
 
 <a id="parameters"></a>
 ### Parameters
@@ -173,14 +230,14 @@ TACO.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG
 | `--fasta` | External pre-assembled FASTA to include in the comparison. |
 | `--busco` | Run BUSCO and optionally set the lineage dataset. |
 | `--choose` | Manually choose the assembler to use as the final refinement backbone. |
+| `--assembly-only` | Run assembler comparison only and stop after generating `assemblies/assembly_info.csv` and the assembly-only summary outputs. |
 | `--auto-mode smart` | Use the biologically informed automatic backbone scoring system that combines BUSCO, telomere support, optional Merqury metrics, contig count, and N50. |
 | `--auto-mode n50` | Use legacy automatic selection based only on the highest N50. |
 | `--merqury` | Enable optional Merqury scoring and reporting using an auto-detected `.meryl` database if available. |
 | `--merqury-db <reads.meryl>` | Enable Merqury and explicitly provide the path to a read-derived `.meryl` database. |
 | `--no-merqury` | Explicitly disable Merqury, even if `merqury.sh` and a `.meryl` database are present. |
 
-<a id="example-run"></a>
-
+<a id="parameter-details"></a>
 ### Parameter Details
 
 #### `--auto-mode smart`
@@ -201,6 +258,9 @@ Use this mode when you want TACO to choose the backbone assembly automatically i
 
 #### `--auto-mode n50`
 This mode uses the highest N50 only. It is useful for reproducing older behavior or for quick continuity-only ranking, but it can favor assemblies with long contigs despite lower completeness.
+
+#### `--assembly-only`
+Use this mode when your main goal is assembler benchmarking and comparison rather than telomere-aware refinement. TACO will run the comparison-oriented steps, build `assemblies/assembly_info.csv`, optionally add Merqury metrics if enabled, and stop before final backbone refinement.
 
 #### `--merqury`
 This enables optional Merqury integration. TACO will try to detect a usable read-derived `.meryl` database automatically from common locations such as `reads.meryl`, `meryl/reads.meryl`, or `merqury/reads.meryl`.
@@ -250,14 +310,17 @@ TACO currently implements the following major steps:
 7. Copy and normalize all assemblies
 8. BUSCO on all assemblies
 9. Telomere contig detection and telomere metrics
-10. Build a telomere-supported contig pool across assemblies
+10. Build an optimized telomere pool across assemblies
 11. QUAST for assembler results
-12. Final assembly refinement with telomere-supported contig replacement
+12. Final assembly refinement with optimized telomere-end replacement
 13. BUSCO analysis of final assembly
 14. Telomere analysis of final assembly
 15. QUAST analysis of final assembly
 16. Final comparison report
 17. Cleanup into structured output folders
+18. Assembly-only comparison summary
+
+If `--assembly-only` is used, TACO follows the comparison path and stops after generating the assembly comparison outputs instead of continuing into final refinement.
 
 <a id="input-data-recommendations"></a>
 ## Input Data Recommendations
@@ -339,13 +402,14 @@ In practice, the TACO workflow mainly depends on the subset needed for the speci
 
 Typical output files and folders include:
 
-- `assemblies/` — normalized assembly FASTA files and summary tables
+- `assemblies/` — normalized assembly FASTA files and summary tables, including `assembly_info.csv`
+- `final_results/` — copied comparison tables and final refined outputs
 - `logs/` — per-step log files
 - `benchmark_logs/` — machine-readable benchmark and timing outputs
 - `version.txt` — software versions recorded for the run
 - final merged assembly files
 - telomere summary files
-- QUAST and BUSCO result directories
+- QUAST, BUSCO, and optional Merqury result directories
 
 <a id="benchmark-logging"></a>
 ## Benchmark Logging
@@ -405,13 +469,15 @@ When `--choose` is not provided, TACO can automatically select the backbone asse
 
 ### Smart scoring system
 
-TACO ranks assemblies using a composite score that prioritizes biological completeness and chromosome-end support over contiguity alone:
+In full refinement mode, TACO ranks assemblies using a composite score that prioritizes biological completeness and chromosome-end support over contiguity alone:
 
 ```text
 score =
   BUSCO_C (%) x 1000
-+ Telomere_double_end_contigs x 500
-+ Telomere_single_end_contigs x 100
++ Telomere_double_end_contigs x 600
++ Telomere_single_end_contigs x 250
++ Merqury_completeness (%) x 200
++ Merqury_QV x 20
 - Number_of_contigs x 10
 + log10(N50) x 100
 ```
@@ -443,5 +509,5 @@ This scoring strategy prevents assemblies with high N50 but poor completeness fr
 During automatic selection, TACO reports the values used for scoring for each assembler, for example:
 
 ```text
-[DEBUG] canu: BUSCO=97.5 T2T=2 single=1 contigs=56 N50=785256 score=...
+[DEBUG] canu: BUSCO=97.5 T2T=2 single=1 MerquryQV=41.2 MerquryComp=99.1 contigs=56 N50=785256 score=...
 ```

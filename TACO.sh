@@ -3,32 +3,58 @@ if [ -z "$BASH_VERSION" ]; then
   exec /usr/bin/env bash "$0" "$@"
 fi
 
-# ------------------------------------------------------------
-# v0.5.1
-# - FIX (Step 12): Unified argument parsing for --choose and --auto-mode to prevent
-#   auto-mode from being ignored during final backbone selection.
-# - CHANGE (Step 12): Added Merqury pre-selection evaluation for all available assembler
-#   outputs when merqury.sh and a .meryl database are present.
-# - CHANGE (Step 12): Added Merqury-derived metrics (QV and completeness) to
-#   assemblies/assembly.merqury.csv and integrated them into assemblies/assembly_info.csv.
-# - CHANGE (Step 12): Updated automatic backbone scoring to include BUSCO completeness,
-#   telomere support, Merqury completeness, Merqury QV, contig count, and N50.
-# - CHANGE (Step 12): Added selection_debug.tsv and selection_decision.txt for transparent
-#   scoring, reproducibility, and reporting of backbone selection.
-# - FIX (Step 12): Improved telomere rescue logic for single-end telomeric contigs by using
-#   terminal overhang rather than whole-contig length differences.
-# - FIX (Step 12): Added post-rescue deduplication against protected telomere contigs to
-#   reduce redundancy before final assembly construction.
-# - CHANGE (Step 16): Added final Merqury evaluation for assemblies/final.merged.fasta and
-#   wrote assemblies/merged.merqury.csv for final assembly comparison.
-# - CHANGE (Step 16): Renamed the final comparison table output to
-#   final_results/final_result.csv and expanded it to include Merqury metrics,
-#   selection score, selected assembler, auto-selection mode, and scoring formula.
-# - FIX (Step 17): Updated cleanup to preserve new final outputs, including
-#   merged.merqury.csv, selection_debug.tsv, selection_decision.txt, and final_result.csv.
-# - CHANGE: TACO now supports telomere-aware backbone refinement with optional
-#   k-mer-based assembly quality scoring through Merqury.
-# ------------------------------------------------------------
+# v0.5.3
+# - MAJOR CHANGE (Step 10): Reworked telomere-pool construction from seqtk telo
+#   coordinate output. Contigs are now separated into biologically distinct classes:
+#   strict T2T contigs, best single-end telomeric contigs, and optimized telomere-supported contigs.
+#
+# - MAJOR CHANGE (Step 10): Preserved the strict meaning of t2t.fasta.
+#   It contains only true double-end telomere-to-telomere contigs.
+#   Best single-end telomeric representatives are written to single_tel_best.fasta,
+#   and the optimized combined pool is written to telomere_supported_best.fasta.
+#
+# - MAJOR CHANGE (Step 10): Added redundancy reduction for single-end telomeric contigs
+#   using all-vs-all minimap2 clustering and longest-representative selection.
+#
+# - MAJOR CHANGE (Step 10): Updated protected telomere-pool priority to:
+#   strict T2T > best single-end telomeric representatives > optimized telomere-supported pool.
+#
+# - MAJOR CHANGE (Step 12): Replaced older final merge behavior with cleaned backbone
+#   refinement logic. The selected assembler output is used as the backbone assembly,
+#   while redundant backbone contigs can be replaced or rescued using the optimized telomere pool.
+#
+# - MAJOR CHANGE (Step 12): Added support for optional automatic backbone selection modes:
+#   smart scoring or legacy N50-only selection.
+#
+# - CHANGE (Step 12): Increased telomere contribution in smart backbone scoring to better
+#   reflect telomere-end retention during final assembly refinement.
+#
+# - CHANGE (Step 12): Added optional Merqury integration for assembler ranking and final
+#   reporting when --merqury or --merqury-db is supplied.
+#
+# - FIX (Step 12): Improved fungal single-end telomere rescue by relaxing terminal overhang,
+#   alignment identity, and coverage thresholds.
+#
+# - CHANGE (Step 12): Telomere rescue now prioritizes single_tel_best_clean.fasta as the
+#   preferred rescue pool before falling back to broader telomeric sets.
+#
+# - CHANGE (Step 14): Updated final telomere analysis to report strict T2T, single-end,
+#   total telomere-supported contigs, protected telomere mode, and rescue counts.
+#
+# - CHANGE (Step 16): Updated final comparison reporting to include Merqury metrics,
+#   telomere-pool statistics, rescue counts, selection score, selected assembler,
+#   auto-selection mode, and score formula in final_results/final_result.csv.
+#
+# - CHANGE (Step 18): Added assembly-only mode to run assembler benchmarking/comparison
+#   without final telomere-aware refinement, while still generating assemblies/assembly_info.csv
+#   and optional Merqury comparison output.
+#
+# - FIX: Removed duplicated old parser/selection code, aligned usage text with current logic,
+#   and cleaned older command fragments left from pre-0.5.x versions.
+#
+# - DESIGN UPDATE: TACO now follows a telomere-pool optimization and backbone-refinement
+#   strategy rather than repeated structural merging, improving chromosome-end retention
+#   while reducing non-telomeric redundancy.
 
 # ===== Version logging helpers =====
 VERSION_FILE="${VERSION_FILE:-version.txt}"
@@ -154,9 +180,14 @@ assembler=""
 external_fasta=""
 run_busco=false
 busco_lineage="ascomycota_odb10"
+assembly_only=false
+merqury_enable=false
+merqury_db=""
+auto_mode="smart"
+CHOOSE_FLAG=0
 
 # --- Logging & versioning ---
-PIPELINE_NAME="TACO-0.5.1.sh"
+PIPELINE_NAME="TACO-0.5.3.sh"
 RUN_ID="$(date +'%Y%m%d_%H%M%S')"
 LOG_DIR="logs"
 mkdir -p "$LOG_DIR"
@@ -210,14 +241,15 @@ step_name() {
     7) echo "Copy all assemblies" ;;
     8) echo "BUSCO for assemblies" ;;
     9) echo "Telomere contigs and metrics" ;;
-    10) echo "Merge all assemblies" ;;
+    10) echo "Build optimized telomere pool" ;;
     11) echo "QUAST for assemblies" ;;
-    12) echo "Final assembly refinement with telomere-supported contig replacement" ;;
+    12) echo "Final assembly refinement with optimized telomere-end replacement" ;;
     13) echo "BUSCO final" ;;
     14) echo "Telomere analysis final" ;;
     15) echo "QUAST final" ;;
     16) echo "Generate final comparison report" ;;
     17) echo "Cleanup temporary files" ;;
+    18) echo "Assembly-only comparison summary" ;;
     *) echo "Unknown step" ;;
   esac
 }
@@ -285,7 +317,7 @@ write_versions() {
 
 usage() {
   cat <<USAGE
-Usage: ${PIPELINE_NAME:-$0} -g <genomesize> -t <threads> --fastq <fastq> -m <motif> [-s <steps>] [--fasta <path>] [--busco <lineage>] [--choose]
+Usage: ${PIPELINE_NAME:-$0} -g <genomesize> -t <threads> --fastq <fastq> -m <motif> [-s <steps>] [--fasta <path>] [--busco <lineage>] [--choose <assembler>] [--auto-mode <smart|n50>] [--assembly-only] [--merqury|--merqury-db <reads.meryl>]
 
 Options:
   -g, --genomesize   Genome size (required), e.g. 2g, 500m
@@ -295,12 +327,22 @@ Options:
   -s, --steps        Steps to run (optional, default: all). Accepts comma/range list (e.g. 1,2,5-7)
   --fasta            External pre-assembled FASTA (optional, single file or URL)
   --busco            Run BUSCO on each individual assembly; optional lineage (default: ascomycota_odb10)
-  --choose           Prompt to choose an assembler for the final merge (canu, nextDenovo, peregrine, ipa, flye, hifiasm)
+  --choose           Prompt for or provide the assembler to use as the final refinement backbone
+  --auto-mode        Auto-selection mode for backbone choice: smart or n50
+  --assembly-only    Run only assembler benchmarking/comparison (steps 1-9,11,18)
+  --merqury          Enable optional Merqury scoring/reporting using auto-detected .meryl database
+  --merqury-db       Enable Merqury and explicitly provide a read-derived .meryl directory
+  --no-merqury       Disable Merqury even if present
 
 Notes:
   • Per-step logs: logs/step_<N>.log with timestamps.
   • A consolidated software version summary is written to ./version.txt at start.
-  • Example: ${PIPELINE_NAME:-$0} -g 2g -t 16 --fastq reads.fastq -m AACCCT -s 1,3-5 --choose
+  • Example full run:
+      ${PIPELINE_NAME:-$0} -g 2g -t 16 --fastq reads.fastq -m AACCCT --auto-mode smart
+  • Example assembly-only run:
+      ${PIPELINE_NAME:-$0} -g 2g -t 16 --fastq reads.fastq -m AACCCT --assembly-only
+  • Example assembly-only run with Merqury:
+      ${PIPELINE_NAME:-$0} -g 2g -t 16 --fastq reads.fastq -m AACCCT --assembly-only --merqury-db reads.meryl
 
 Steps:
   1. HiCanu assembly
@@ -312,7 +354,7 @@ Steps:
   7. Copy all assemblies
   8. BUSCO on all assemblies (including external)
   9. Telomere contigs + metrics
-  10. Merge all assemblies
+  10. Build optimized telomere pool
   11. QUAST for all assembler results
   12. Final assembly refinement using selected assembler
   13. BUSCO analysis (final)
@@ -320,6 +362,7 @@ Steps:
   15. QUAST analysis (final)
   16. Generate final comparison report
   17. Cleanup temporary files into structured folders
+  18. Assembly-only comparison summary
 USAGE
   exit 1
 }
@@ -363,11 +406,10 @@ NR==1{
 }
 AWK
 
-    local candidates=(
-    "assemblies/assembly.busco.csv"   "assemblies/assembly_busco.csv"   "assemblies/busco.csv"
-    "assemblies/assembly.quast.csv"   "assemblies/assembly_quast.csv"   "assemblies/quast.csv"
-    "assemblies/assembly.telo.csv"    "assemblies/assembly_telo.csv"    "assemblies/telo.csv"
-    "assemblies/assembly.merqury.csv" "assemblies/assembly_merqury.csv" "assemblies/merqury.csv"
+  local candidates=(
+    "assemblies/assembly.busco.csv" "assemblies/assembly_busco.csv" "assemblies/busco.csv"
+    "assemblies/assembly.quast.csv" "assemblies/assembly_quast.csv" "assemblies/quast.csv"
+    "assemblies/assembly.telo.csv"  "assemblies/assembly_telo.csv"  "assemblies/telo.csv"
   )
   for f in "${candidates[@]}"; do
     if [[ -s "$f" ]]; then
@@ -408,8 +450,14 @@ while getopts ":g:t:s:m:-:" opt; do
     m) motif="$OPTARG" ;;
     -)
       case "${OPTARG}" in
-        fastq) fastq="${!OPTIND}"; OPTIND=$((OPTIND + 1)) ;;
-        fasta) external_fasta="${!OPTIND}"; OPTIND=$((OPTIND + 1)) ;;
+        fastq)
+          fastq="${!OPTIND}"
+          OPTIND=$((OPTIND + 1))
+          ;;
+        fasta)
+          external_fasta="${!OPTIND}"
+          OPTIND=$((OPTIND + 1))
+          ;;
         busco)
           run_busco=true
           next_arg="${!OPTIND}"
@@ -419,10 +467,38 @@ while getopts ":g:t:s:m:-:" opt; do
           fi
           ;;
         choose)
-          echo "Please enter the assembler you want to use for the final merge (canu, nextDenovo, peregrine, ipa, flye, hifiasm):"
-          read assembler
+          CHOOSE_FLAG=1
+          next_arg="${!OPTIND}"
+          if [[ -n "$next_arg" && "$next_arg" != -* ]]; then
+            assembler="$next_arg"
+            OPTIND=$((OPTIND + 1))
+          else
+            echo "Please enter the assembler you want to use for the final refinement backbone (canu, nextDenovo, peregrine, ipa, flye, hifiasm):"
+            read assembler
+          fi
           ;;
-        *) echo "Unknown option --${OPTARG}" >&2; usage ;;
+        auto-mode)
+          auto_mode="${!OPTIND}"
+          OPTIND=$((OPTIND + 1))
+          ;;
+        assembly-only)
+          assembly_only=true
+          ;;
+        merqury)
+          merqury_enable=true
+          ;;
+        no-merqury)
+          merqury_enable=false
+          ;;
+        merqury-db)
+          merqury_enable=true
+          merqury_db="${!OPTIND}"
+          OPTIND=$((OPTIND + 1))
+          ;;
+        *)
+          echo "Unknown option --${OPTARG}" >&2
+          usage
+          ;;
       esac
       ;;
     \?) echo "Invalid option: -$OPTARG" >&2; usage ;;
@@ -433,6 +509,12 @@ done
 # Ensure required options
 if [[ -z "$genomesize" || -z "$threads" || -z "$fastq" || -z "$motif" ]]; then
   usage
+fi
+
+if [[ "$assembly_only" == true ]]; then
+  echo "[info] Assembly-only mode enabled"
+  steps=()
+  expand_steps "1-9,11,18"
 fi
 
 write_versions
@@ -975,88 +1057,230 @@ PY
       check_command
       ;;
     10)
-      echo "Step 10 - Merge all telo assemblies"
+      echo "Step 10 - Build optimized telomere contig pool"
+
       shopt -s nullglob
+
       fasta_files=(assemblies/*.telo.fasta)
       if [[ ${#fasta_files[@]} -eq 0 ]]; then
         echo "[info] No per-assembly *.telo.fasta files found; generating per-assembly telomere-contig FASTAs from ./assemblies/*.result.fasta using motif '${motif:-TTAGGG}'."
-        shopt -s nullglob
+
         for f in assemblies/*.result.fasta; do
           [[ -s "$f" ]] || continue
-          base=$(basename "$f"); base="${base%.result.fasta}"; base="${base%.fasta}"
+          base=$(basename "$f")
+          base="${base%.result.fasta}"
+          base="${base%.fasta}"
+
           M="${motif:-TTAGGG}"
           RC="$(echo "$M" | tr 'ACGTacgtnN' 'TGCAtgcanN' | rev)"
+
           awk -v W="${TELO_WINDOW:-200}" -v R="${TELO_MIN_REPEATS:-3}" -v M="$M" -v RC="$RC" '
-            BEGIN{ pat="(" M "|" RC "){" R ",}" }
-            /^>/ { if(seq!=""){
-                      left=substr(seq,1,W); right=substr(seq,length(seq)-W+1,W);
-                      if( (left ~ pat) || (right ~ pat) ){ print header; print seq; }
-                   }
-                   header=$0; seq=""; next }
-            { gsub(/[ \t]/,""); seq=seq $0 }
-            END{
-              if(seq!=""){
-                left=substr(seq,1,W); right=substr(seq,length(seq)-W+1,W);
-                if( (left ~ pat) || (right ~ pat) ){ print header; print seq; }
+            BEGIN { pat="(" M "|" RC "){" R ",}" }
+            /^>/ {
+              if (seq != "") {
+                left=substr(seq,1,W)
+                right=substr(seq,length(seq)-W+1,W)
+                if ((left ~ pat) || (right ~ pat)) {
+                  print header
+                  print seq
+                }
               }
-            }' "$f" > "assemblies/${base}.telo.fasta"
+              header=$0
+              seq=""
+              next
+            }
+            {
+              gsub(/[ 	
+]/,"")
+              seq=seq $0
+            }
+            END {
+              if (seq != "") {
+                left=substr(seq,1,W)
+                right=substr(seq,length(seq)-W+1,W)
+                if ((left ~ pat) || (right ~ pat)) {
+                  print header
+                  print seq
+                }
+              }
+            }
+          ' "$f" > "assemblies/${base}.telo.fasta"
+
           [[ -s "assemblies/${base}.telo.fasta" ]] || rm -f "assemblies/${base}.telo.fasta"
+
           if [[ -s "assemblies/${base}.telo.fasta" ]]; then
+            require_cmd seqtk
             seqtk telo -s 1 -m "$motif" "assemblies/${base}.telo.fasta" > "assemblies/${base}.telo.list" || true
           fi
         done
+
         fasta_files=(assemblies/*.telo.fasta)
         if [[ ${#fasta_files[@]} -eq 0 ]]; then
           echo "[error] Still no *.telo.fasta files after generation. Check Step 7 and motif '$motif'."
           exit 1
         fi
       fi
-      # Build list of available .telo.fasta files again to ensure up-to-date
-shopt -s nullglob
-fasta_files=(assemblies/*.telo.fasta)
-if [[ ${#fasta_files[@]} -eq 1 ]]; then
-  echo "[info] Only one telo FASTA found: ${fasta_files[0]}"
-  cp -f "${fasta_files[0]}" allmerged_telo.fasta
-else
-  # Merge unique pairs (i<j) to avoid self-merges and duplicates
-  rm -f merged_*.fasta
-  for ((i=0; i<${#fasta_files[@]}; i++)); do
-    for ((j=i+1; j<${#fasta_files[@]}; j++)); do
-      file1="${fasta_files[i]}"
-      file2="${fasta_files[j]}"
-      base1=$(basename "$file1" .telo.fasta)
-      base2=$(basename "$file2" .telo.fasta)
-      require_cmd merge_wrapper.py
-      log_version "merge_wrapper.py" "merge_wrapper.py"
-      merge_wrapper.py -l 1000000 "$file1" "$file2" --prefix merged_"$base1"_"$base2"
-      check_command
-    done
-  done
-  shopt -s nullglob
-  merged_list=(merged_*.fasta)
-  if [[ ${#merged_list[@]} -eq 0 ]]; then
-    echo "[warn] No merged_* files produced; falling back to concatenating input telo FASTAs."
-    cat "${fasta_files[@]}" > allmerged_telo.fasta
-  else
-    cat "${merged_list[@]}" > allmerged_telo.fasta
-  fi
-fi
+
+      fasta_files=(assemblies/*.telo.fasta)
+
+      if [[ ${#fasta_files[@]} -eq 1 ]]; then
+        echo "[info] Only one telo FASTA found: ${fasta_files[0]}"
+        cp -f "${fasta_files[0]}" allmerged_telo.fasta
+      else
+        rm -f merged_*.fasta
+
+        for ((i=0; i<${#fasta_files[@]}; i++)); do
+          for ((j=i+1; j<${#fasta_files[@]}; j++)); do
+            file1="${fasta_files[i]}"
+            file2="${fasta_files[j]}"
+            base1=$(basename "$file1" .telo.fasta)
+            base2=$(basename "$file2" .telo.fasta)
+
+            require_cmd merge_wrapper.py
+            log_version "merge_wrapper.py" "merge_wrapper.py" 2>/dev/null || true
+            merge_wrapper.py -l 1000000 "$file1" "$file2" --prefix merged_"$base1"_"$base2"
+            check_command
+          done
+        done
+
+        merged_list=(merged_*.fasta)
+        if [[ ${#merged_list[@]} -eq 0 ]]; then
+          echo "[warn] No merged_* files produced; falling back to concatenating input telo FASTAs."
+          cat "${fasta_files[@]}" > allmerged_telo.fasta
+        else
+          cat "${merged_list[@]}" > allmerged_telo.fasta
+        fi
+      fi
+
       require_cmd funannotate
       funannotate sort -i allmerged_telo.fasta -b contig -o allmerged_telo_sort.fasta --minlen 500
+      check_command
 
       require_cmd seqtk
       seqtk telo -s 1 -m "$motif" allmerged_telo_sort.fasta > allmerged.telo.list
+      check_command
 
-      # Build strict T2T, single-end telomeric, and telomere-supported lists
       t2t_list_inline -i allmerged.telo.list -o t2t.list -s single_tel.list -u telomere_supported.list
 
-      # Extract FASTA sets from the lists
       extract_by_list t2t.list allmerged_telo_sort.fasta t2t.fasta
       extract_by_list single_tel.list allmerged_telo_sort.fasta single_tel.fasta
       extract_by_list telomere_supported.list allmerged_telo_sort.fasta telomere_supported.fasta
 
-      # Clean each class if non-empty
+      if [[ -s single_tel.fasta ]] && command -v minimap2 >/dev/null 2>&1; then
+        echo "[INFO] Optimizing single-end telomeric pool by redundancy reduction"
+        log_version "minimap2" "minimap2" 2>/dev/null || true
+
+        minimap2 -x asm20 -D -P -t "${threads:-8}" single_tel.fasta single_tel.fasta > single_tel.self.paf
+        check_command
+
+        python3 - <<'PY'
+import sys
+from pathlib import Path
+
+fa = Path("single_tel.fasta")
+paf = Path("single_tel.self.paf")
+out_ids = Path("single_tel_best.ids")
+out_tsv = Path("telomere_cluster_summary.tsv")
+
+def read_fa(path):
+    seqs = {}
+    name = None
+    buf = []
+    with open(path) as f:
+        for ln in f:
+            if ln.startswith(">"):
+                if name is not None:
+                    seqs[name] = "".join(buf)
+                name = ln[1:].strip().split()[0]
+                buf = []
+            else:
+                buf.append(ln.strip())
+        if name is not None:
+            seqs[name] = "".join(buf)
+    return seqs
+
+seqs = read_fa(fa)
+names = sorted(seqs)
+parent = {n: n for n in names}
+
+def find(x):
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+
+def union(a, b):
+    ra = find(a)
+    rb = find(b)
+    if ra != rb:
+        parent[rb] = ra
+
+for ln in open(paf):
+    if not ln.strip() or ln.startswith("#"):
+        continue
+    p = ln.rstrip().split("	")
+    if len(p) < 12:
+        continue
+
+    qname = p[0]
+    qlen = int(p[1])
+    qs = int(p[2])
+    qe = int(p[3])
+    tname = p[5]
+    matches = int(p[9])
+    alnlen = int(p[10])
+
+    if qname == tname:
+        continue
+    if qname not in seqs or tname not in seqs or alnlen <= 0:
+        continue
+
+    ident = matches / max(1, alnlen)
+    qcov = (qe - qs) / max(1, qlen)
+
+    if ident >= 0.95 and qcov >= 0.85:
+        union(qname, tname)
+
+clusters = {}
+for n in names:
+    clusters.setdefault(find(n), []).append(n)
+
+best = []
+with open(out_tsv, "w") as o:
+    o.write("cluster_id	representative	members
+")
+    for cid, members in sorted(clusters.items()):
+        members = sorted(members, key=lambda x: (len(seqs[x]), x), reverse=True)
+        rep = members[0]
+        best.append(rep)
+        o.write(f"{cid}	{rep}	{','.join(members)}
+")
+
+with open(out_ids, "w") as o:
+    for n in sorted(best):
+        o.write(n + "
+")
+PY
+        check_command
+
+        extract_by_list single_tel_best.ids single_tel.fasta single_tel_best.fasta
+      else
+        cp -f single_tel.fasta single_tel_best.fasta 2>/dev/null || : > single_tel_best.fasta
+      fi
+
+      : > telomere_supported_best.fasta
+      if [[ -s t2t.fasta ]]; then
+        cat t2t.fasta >> telomere_supported_best.fasta
+      fi
+      if [[ -s single_tel_best.fasta ]]; then
+        cat single_tel_best.fasta >> telomere_supported_best.fasta
+      fi
+      if [[ ! -s telomere_supported_best.fasta && -s telomere_supported.fasta ]]; then
+        cp -f telomere_supported.fasta telomere_supported_best.fasta
+      fi
+
       require_cmd funannotate
+
       if [[ -s t2t.fasta ]]; then
         funannotate clean -i t2t.fasta -p 30 -o t2t_clean.fasta --exhaustive
         check_command
@@ -1064,49 +1288,57 @@ fi
         : > t2t_clean.fasta
       fi
 
-      if [[ -s single_tel.fasta ]]; then
-        funannotate clean -i single_tel.fasta -p 30 -o single_tel_clean.fasta --exhaustive
+      if [[ -s single_tel_best.fasta ]]; then
+        funannotate clean -i single_tel_best.fasta -p 30 -o single_tel_best_clean.fasta --exhaustive
         check_command
       else
-        : > single_tel_clean.fasta
+        : > single_tel_best_clean.fasta
       fi
 
-      if [[ -s telomere_supported.fasta ]]; then
-        funannotate clean -i telomere_supported.fasta -p 30 -o telomere_supported_clean.fasta --exhaustive
+      if [[ -s telomere_supported_best.fasta ]]; then
+        funannotate clean -i telomere_supported_best.fasta -p 30 -o telomere_supported_best_clean.fasta --exhaustive
         check_command
       else
-        : > telomere_supported_clean.fasta
+        : > telomere_supported_best_clean.fasta
       fi
 
-      # Summary for downstream logic and reporting
+      cp -f single_tel_best.fasta single_tel.fasta 2>/dev/null || true
+      cp -f single_tel_best_clean.fasta single_tel_clean.fasta 2>/dev/null || true
+      cp -f telomere_supported_best.fasta telomere_supported.fasta 2>/dev/null || true
+      cp -f telomere_supported_best_clean.fasta telomere_supported_clean.fasta 2>/dev/null || true
+
       strict_t2t_n=$(grep -c '^>' t2t.fasta 2>/dev/null || true)
-      single_tel_n=$(grep -c '^>' single_tel.fasta 2>/dev/null || true)
-      tel_supported_n=$(grep -c '^>' telomere_supported.fasta 2>/dev/null || true)
+      single_tel_n=$(grep -c '^>' single_tel_best.fasta 2>/dev/null || true)
+      tel_supported_n=$(grep -c '^>' telomere_supported_best.fasta 2>/dev/null || true)
 
       {
         echo "strict_t2t_contigs,${strict_t2t_n:-0}"
-        echo "single_telomere_contigs,${single_tel_n:-0}"
-        echo "telomere_supported_contigs,${tel_supported_n:-0}"
+        echo "single_telomere_best_contigs,${single_tel_n:-0}"
+        echo "telomere_supported_best_contigs,${tel_supported_n:-0}"
       } > telomere_support_summary.csv
 
       echo "[INFO] Telomere support summary:"
       cat telomere_support_summary.csv
 
-      # Choose protected set for downstream merge logic
       if [[ -s t2t_clean.fasta ]]; then
         cp -f t2t_clean.fasta protected_telomere_contigs.fasta
         echo "strict_t2t" > protected_telomere_mode.txt
         echo "[INFO] Protected contigs mode: strict_t2t"
-      elif [[ -s telomere_supported_clean.fasta ]]; then
-        cp -f telomere_supported_clean.fasta protected_telomere_contigs.fasta
-        echo "telomere_supported" > protected_telomere_mode.txt
-        echo "[INFO] Protected contigs mode: telomere_supported"
+      elif [[ -s single_tel_best_clean.fasta ]]; then
+        cp -f single_tel_best_clean.fasta protected_telomere_contigs.fasta
+        echo "single_tel_best" > protected_telomere_mode.txt
+        echo "[INFO] Protected contigs mode: single_tel_best"
+      elif [[ -s telomere_supported_best_clean.fasta ]]; then
+        cp -f telomere_supported_best_clean.fasta protected_telomere_contigs.fasta
+        echo "telomere_supported_best" > protected_telomere_mode.txt
+        echo "[INFO] Protected contigs mode: telomere_supported_best"
       else
         : > protected_telomere_contigs.fasta
         echo "none" > protected_telomere_mode.txt
         echo "[WARN] No telomere-supported contigs found"
       fi
       ;;
+
     11)
       echo "Step 11 - QUAST metrics for all assemblies"
 
@@ -1227,78 +1459,20 @@ PY
       echo "[ok] Wrote assemblies/assembly.quast.csv"
       ;;
     12)
-      echo "Step 12 - Final assembly refinement with telomere-supported contig replacement"
+      echo "Step 12 - Final assembly refinement with optimized telomere-end replacement"
 
-      assembler=""
-      CHOOSE_FLAG=0
-      AUTO_MODE="smart"
+      assembler="${assembler:-}"
+      CHOOSE_FLAG="${CHOOSE_FLAG:-0}"
+      AUTO_MODE="${auto_mode:-smart}"
       MERQURY_ENABLE=0
-      MERQURY_DB=""
-
-      while [[ $# -gt 0 ]]; do
-        case "$1" in
-          --choose)
-            CHOOSE_FLAG=1
-            if [[ -n "${2:-}" && "${2#-}" == "$2" ]]; then
-              assembler="$2"
-              shift 2
-            else
-              shift
-            fi
-            ;;
-          --choose=*)
-            CHOOSE_FLAG=1
-            assembler="${1#--choose=}"
-            shift
-            ;;
-          --auto-mode)
-            if [[ -n "${2:-}" && "${2#-}" == "$2" ]]; then
-              AUTO_MODE="$2"
-              shift 2
-            else
-              echo "[error] --auto-mode requires a value (smart or n50)." >&2
-              exit 2
-            fi
-            ;;
-          --auto-mode=*)
-            AUTO_MODE="${1#--auto-mode=}"
-            shift
-            ;;
-          --merqury)
-            MERQURY_ENABLE=1
-            shift
-            ;;
-          --no-merqury)
-            MERQURY_ENABLE=0
-            shift
-            ;;
-          --merqury-db)
-            MERQURY_ENABLE=1
-            if [[ -n "${2:-}" && "${2#-}" == "$2" ]]; then
-              MERQURY_DB="$2"
-              shift 2
-            else
-              echo "[error] --merqury-db requires a path to a .meryl directory." >&2
-              exit 2
-            fi
-            ;;
-          --merqury-db=*)
-            MERQURY_ENABLE=1
-            MERQURY_DB="${1#--merqury-db=}"
-            shift
-            ;;
-          *)
-            break
-            ;;
-        esac
-      done
+      [[ "${merqury_enable:-false}" == true ]] && MERQURY_ENABLE=1
+      MERQURY_DB="${merqury_db:-}"
 
       echo "[info] Auto-selection mode: $AUTO_MODE"
       echo "[info] Merqury enabled: $MERQURY_ENABLE"
 
       mkdir -p merqury assemblies
 
-      # Step 12A: optional Merqury pre-selection for assembler ranking
       if [[ "$MERQURY_ENABLE" -eq 1 ]]; then
         if [[ -z "$MERQURY_DB" ]]; then
           for cand in reads.meryl meryl/reads.meryl merqury/reads.meryl *.meryl; do
@@ -1339,24 +1513,17 @@ PY
         echo "[INFO] Merqury disabled for this run"
       fi
 
-      # Always write Merqury summary CSV so downstream logic remains consistent
       python3 - <<'PY'
 import os, csv, re
-
 assemblers = ["canu","external","flye","ipa","nextDenovo","peregrine","hifiasm"]
-rows = [
-    ["Metric"] + assemblers,
-    ["Merqury QV"],
-    ["Merqury completeness (%)"],
-]
-
+rows = [["Metric"] + assemblers, ["Merqury QV"], ["Merqury completeness (%)"]]
 def parse_first_float(path):
     if not os.path.exists(path):
         return ""
     txt = open(path, "r", errors="ignore").read()
     patterns = [
-        r'(?i)\bqv\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
-        r'(?i)\bcompleteness\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)qv[^0-9]*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)completeness[^0-9]*([0-9]+(?:\.[0-9]+)?)',
         r'([0-9]+(?:\.[0-9]+)?)'
     ]
     for pat in patterns:
@@ -1364,24 +1531,16 @@ def parse_first_float(path):
         if m:
             return m.group(1)
     return ""
-
 for asm in assemblers:
-    qv_file = os.path.join("merqury", f"{asm}.qv")
-    comp_file = os.path.join("merqury", f"{asm}.completeness.stats")
-    qv = parse_first_float(qv_file)
-    comp = parse_first_float(comp_file)
-    rows[1].append(qv)
-    rows[2].append(comp)
-
+    rows[1].append(parse_first_float(os.path.join("merqury", f"{asm}.qv")))
+    rows[2].append(parse_first_float(os.path.join("merqury", f"{asm}.completeness.stats")))
 with open("assemblies/assembly.merqury.csv", "w", newline="") as f:
     csv.writer(f).writerows(rows)
-
 print("Wrote assemblies/assembly.merqury.csv")
 PY
 
       build_assembly_info_v2
 
-      # Auto-select assembler if --choose not provided
       if [[ $CHOOSE_FLAG -eq 0 && -z "$assembler" ]]; then
         if [[ ! -s assemblies/assembly_info.csv ]]; then
           echo "[warn] assemblies/assembly_info.csv missing or empty; cannot auto-select assembler." >&2
@@ -1392,138 +1551,74 @@ PY
 python3 - <<PY
 import csv, math, sys
 from pathlib import Path
-
 mode = "${AUTO_MODE}".strip().lower()
 info = Path("assemblies") / "assembly_info.csv"
 debug_tsv = Path("assemblies") / "selection_debug.tsv"
 decision_txt = Path("assemblies") / "selection_decision.txt"
-
 try:
     with info.open(newline="") as f:
         rows = list(csv.reader(f))
 except Exception:
     sys.exit(0)
-
 if not rows:
     sys.exit(0)
-
 header = [h.strip() for h in rows[0]]
 rows = rows[1:]
-
-busco_row = None
-contig_row = None
-n50_row = None
-t2t_row = None
-single_row = None
-merqury_qv_row = None
-merqury_comp_row = None
-
+lookup = {}
 for r in rows:
-    if not r:
-        continue
-    name = r[0].strip().lower()
-    if "busco c (%)" in name:
-        busco_row = r
-    elif name == "# contigs":
-        contig_row = r
-    elif name == "n50":
-        n50_row = r
-    elif "telomere double-end contigs" in name:
-        t2t_row = r
-    elif "telomere single-end contigs" in name:
-        single_row = r
-    elif "merqury qv" in name:
-        merqury_qv_row = r
-    elif "merqury completeness (%)" in name:
-        merqury_comp_row = r
-
-best_name = None
-best_score = None
-records = []
-
+    if r:
+        lookup[r[0].strip().lower()] = r
+def find_row(substr):
+    for k,v in lookup.items():
+        if substr in k:
+            return v
+    return None
+busco_row = find_row("busco c (%)")
+contig_row = lookup.get("# contigs")
+n50_row = lookup.get("n50")
+t2t_row = find_row("telomere double-end contigs")
+single_row = find_row("telomere single-end contigs")
+merqury_qv_row = find_row("merqury qv")
+merqury_comp_row = find_row("merqury completeness (%)")
+best_name=None; best_score=None; records=[]
 for idx, asm in enumerate(header[1:], start=1):
-    asm = asm.strip()
+    asm=asm.strip()
     if not asm:
         continue
-
     fa = Path("assemblies") / f"{asm}.result.fasta"
     if not fa.is_file() or fa.stat().st_size == 0:
         continue
-
     def get(row, default=0.0):
-        try:
-            return float(row[idx])
-        except Exception:
-            return default
-
-    busco = get(busco_row, 0.0)
-    contigs = get(contig_row, 0.0)
-    n50 = get(n50_row, 0.0)
-    t2t = get(t2t_row, 0.0)
-    single = get(single_row, 0.0)
-    merqury_qv = get(merqury_qv_row, 0.0)
-    merqury_comp = get(merqury_comp_row, 0.0)
-
+        try: return float(row[idx])
+        except Exception: return default
+    busco=get(busco_row,0.0); contigs=get(contig_row,0.0); n50=get(n50_row,0.0)
+    t2t=get(t2t_row,0.0); single=get(single_row,0.0)
+    merqury_qv=get(merqury_qv_row,0.0); merqury_comp=get(merqury_comp_row,0.0)
     if mode == "n50":
-        if n50 <= 0:
-            continue
-        score = n50
+        if n50 <= 0: continue
+        score=n50
     else:
-        if contigs <= 0 or n50 <= 0:
-            continue
-        score = (
-            busco * 1000
-            + t2t * 500
-            + single * 100
-            + merqury_comp * 200
-            + merqury_qv * 20
-            - contigs * 10
-            + math.log10(n50) * 100
-        )
-
-    records.append({
-        "assembler": asm,
-        "busco_c": busco,
-        "t2t": t2t,
-        "single_tel": single,
-        "merqury_qv": merqury_qv,
-        "merqury_comp": merqury_comp,
-        "contigs": contigs,
-        "n50": n50,
-        "score": score,
-    })
-
-    print(
-        f"[DEBUG] {asm}: BUSCO={busco} T2T={t2t} single={single} "
-        f"MerquryQV={merqury_qv} MerquryComp={merqury_comp} "
-        f"contigs={contigs} N50={n50} score={score}",
-        file=sys.stderr
-    )
-
+        if contigs <= 0 or n50 <= 0: continue
+        score=(busco*1000 + t2t*600 + single*250 + merqury_comp*200 + merqury_qv*20 - contigs*10 + math.log10(n50)*100)
+    records.append({"assembler":asm,"busco_c":busco,"t2t":t2t,"single_tel":single,"merqury_qv":merqury_qv,"merqury_comp":merqury_comp,"contigs":contigs,"n50":n50,"score":score})
+    print(f"[DEBUG] {asm}: BUSCO={busco} T2T={t2t} single={single} MerquryQV={merqury_qv} MerquryComp={merqury_comp} contigs={contigs} N50={n50} score={score}", file=sys.stderr)
     if best_score is None or score > best_score:
-        best_name = asm
-        best_score = score
-
+        best_name=asm; best_score=score
 with debug_tsv.open("w", newline="") as f:
-    w = csv.writer(f, delimiter="\\t")
-    w.writerow([
-        "assembler", "busco_c", "t2t", "single_tel",
-        "merqury_qv", "merqury_comp", "contigs", "n50", "score"
-    ])
+    w=csv.writer(f, delimiter="	")
+    w.writerow(["assembler","busco_c","t2t","single_tel","merqury_qv","merqury_comp","contigs","n50","score"])
     for r in records:
-        w.writerow([
-            r["assembler"], r["busco_c"], r["t2t"], r["single_tel"],
-            r["merqury_qv"], r["merqury_comp"], r["contigs"], r["n50"], r["score"]
-        ])
-
+        w.writerow([r["assembler"],r["busco_c"],r["t2t"],r["single_tel"],r["merqury_qv"],r["merqury_comp"],r["contigs"],r["n50"],r["score"]])
 with decision_txt.open("w") as f:
-    f.write(f"auto_mode\\t{mode}\\n")
-    f.write(f"selected_assembler\\t{best_name or ''}\\n")
-    f.write(f"selected_score\\t{best_score if best_score is not None else ''}\\n")
-    f.write("score_formula\\tBUSCO*1000 + T2T*500 + single*100 + MerquryComp*200 + MerquryQV*20 - contigs*10 + log10(N50)*100\\n")
-
-if best_name:
-    print(best_name)
+    f.write(f"auto_mode	{mode}
+")
+    f.write(f"selected_assembler	{best_name or ''}
+")
+    f.write(f"selected_score	{best_score if best_score is not None else ''}
+")
+    f.write("score_formula	BUSCO*1000 + T2T*600 + single*250 + MerquryComp*200 + MerquryQV*20 - contigs*10 + log10(N50)*100
+")
+if best_name: print(best_name)
 PY
           )"
 
@@ -1542,7 +1637,6 @@ PY
           exit 2
         fi
       fi
-
       while :; do
         assembler="$(printf "%s" "$assembler" | awk '{$1=$1};1')"
         if printf ' %s ' "$valid_assemblers" | grep -q " $assembler "; then
@@ -1558,13 +1652,11 @@ PY
       asm_fa="assemblies/${assembler}.result.fasta"
       if [[ ! -s "$asm_fa" ]]; then
         echo "[error] Selected assembler '$assembler' does not have '$asm_fa'." >&2
-        echo "       Tip: choices are based on files named assemblies/<name>.result.fasta" >&2
         exit 1
       fi
 
       protected_fasta=""
       protected_mode="none"
-
       if [[ -s protected_telomere_contigs.fasta ]]; then
         protected_fasta="protected_telomere_contigs.fasta"
         if [[ -s protected_telomere_mode.txt ]]; then
@@ -1577,51 +1669,37 @@ PY
       echo "[INFO] Protected mode for final refinement: $protected_mode"
       echo "[INFO] Selected backbone assembly: $asm_fa"
 
-      # Prepare backbone
       python3 - "$asm_fa" <<'PY'
 import sys
 from pathlib import Path
-
-inp = Path(sys.argv[1])
-out = Path("assemblies/backbone.clean.fa")
-
+inp = Path(sys.argv[1]); out = Path("assemblies/backbone.clean.fa")
 seen = {}
 with inp.open() as f, out.open("w") as o:
-    name = None
-    seq = []
-
+    name=None; seq=[]
     def flush():
-        if name is None:
-            return
-        base = name.split()[0]
-        base = "".join(c if c.isalnum() or c in "._-" else "_" for c in base)
+        if name is None: return
+        base=name.split()[0]
+        base="".join(c if c.isalnum() or c in "._-" else "_" for c in base)
         if base in seen:
-            seen[base] += 1
-            new = f"{base}_{seen[base]}"
+            seen[base]+=1; new=f"{base}_{seen[base]}"
         else:
-            seen[base] = 1
-            new = base
-        s = "".join(seq)
-        if not s:
-            return
-        o.write(f">{new}\n")
-        for i in range(0, len(s), 60):
-            o.write(s[i:i+60] + "\n")
-
+            seen[base]=1; new=base
+        s="".join(seq)
+        if not s: return
+        o.write(f">{new}
+")
+        for i in range(0,len(s),60): o.write(s[i:i+60]+"
+")
     for ln in f:
         if ln.startswith(">"):
-            flush()
-            name = ln[1:].strip()
-            seq = []
+            flush(); name=ln[1:].strip(); seq=[]
         else:
             seq.append(ln.strip())
     flush()
 PY
       check_command
-
       backbone_fa="assemblies/backbone.clean.fa"
 
-      # Step 12B: protect strict T2T / telomere-supported contigs if available
       if [[ -n "$protected_fasta" && -s "$protected_fasta" ]]; then
         echo "[INFO] Using protected telomere contigs from $protected_fasta"
         cp -f "$protected_fasta" assemblies/protected.telomere.fa
@@ -1629,81 +1707,52 @@ PY
         if command -v minimap2 >/dev/null 2>&1; then
           log_version "minimap2" "minimap2" 2>/dev/null || true
           paf="assemblies/backbone_vs_protected.paf"
-
           minimap2 -x asm20 -t "${threads:-8}" assemblies/protected.telomere.fa "$backbone_fa" > "$paf"
           check_command
 
           python3 - "$paf" "$backbone_fa" > assemblies/backbone.keep.ids <<'PY'
 import os, sys
-cov_thr = float(os.getenv("PROTECT_COV", "0.95"))
-id_thr = float(os.getenv("PROTECT_ID", "0.95"))
-
-best = {}
+cov_thr=float(os.getenv("PROTECT_COV","0.95")); id_thr=float(os.getenv("PROTECT_ID","0.95"))
+best={}
 with open(sys.argv[1]) as f:
     for ln in f:
-        if not ln.strip() or ln.startswith("#"):
-            continue
-        parts = ln.rstrip().split("\t")
-        if len(parts) < 12:
-            continue
-
-        qname = parts[0]
-        qlen = int(parts[1])
-        qs = int(parts[2])
-        qe = int(parts[3])
-        matches = int(parts[9])
-        alnlen = int(parts[10])
-
-        if qlen <= 0 or alnlen <= 0:
-            continue
-
-        ident = matches / max(1, alnlen)
-        cov = (qe - qs) / max(1, qlen)
-
-        cur = best.get(qname, (0.0, 0.0))
-        if cov > cur[0] or (abs(cov-cur[0]) < 1e-12 and ident > cur[1]):
-            best[qname] = (cov, ident)
-
-drop = {q for q, (cov, ident) in best.items() if cov >= cov_thr and ident >= id_thr}
-
-keep = []
+        if not ln.strip() or ln.startswith("#"): continue
+        p=ln.rstrip().split("	")
+        if len(p)<12: continue
+        qname=p[0]; qlen=int(p[1]); qs=int(p[2]); qe=int(p[3]); matches=int(p[9]); alnlen=int(p[10])
+        if qlen<=0 or alnlen<=0: continue
+        ident=matches/max(1,alnlen); cov=(qe-qs)/max(1,qlen)
+        cur=best.get(qname,(0.0,0.0))
+        if cov>cur[0] or (abs(cov-cur[0])<1e-12 and ident>cur[1]): best[qname]=(cov,ident)
+drop={q for q,(cov,ident) in best.items() if cov>=cov_thr and ident>=id_thr}
+keep=[]
 with open(sys.argv[2]) as f:
-    name = None
+    name=None
     for ln in f:
         if ln.startswith(">"):
-            if name is not None and name not in drop:
-                keep.append(name)
-            name = ln[1:].strip().split()[0]
-    if name is not None and name not in drop:
-        keep.append(name)
-
-print("\n".join(keep))
+            if name is not None and name not in drop: keep.append(name)
+            name=ln[1:].strip().split()[0]
+    if name is not None and name not in drop: keep.append(name)
+print("
+".join(keep))
 PY
           check_command
 
           python3 - assemblies/backbone.keep.ids "$backbone_fa" assemblies/backbone.filtered.fa <<'PY'
 import sys
-ids_file, inp, outp = sys.argv[1:4]
-
-with open(ids_file) as f:
-    ids = {ln.strip() for ln in f if ln.strip()}
-
-with open(inp) as f, open(outp, "w") as o:
-    name = None
-    seq = []
-
+ids={ln.strip() for ln in open(sys.argv[1]) if ln.strip()}
+with open(sys.argv[2]) as f, open(sys.argv[3],"w") as o:
+    name=None; seq=[]
     def flush():
         if name is not None and name in ids:
-            o.write(f">{name}\n")
-            s = "".join(seq)
-            for i in range(0, len(s), 60):
-                o.write(s[i:i+60] + "\n")
-
+            o.write(f">{name}
+")
+            s="".join(seq)
+            for i in range(0,len(s),60): o.write(s[i:i+60]+"
+")
     for ln in f:
         if ln.startswith(">"):
-            flush()
-            name = ln[1:].strip().split()[0]
-            seq = []
+            flush(); name=ln[1:].strip().split()[0]; seq=[]
         else:
             seq.append(ln.strip())
     flush()
@@ -1718,16 +1767,12 @@ PY
         BEGIN {
           while ((getline < PFA) > 0) {
             if ($0 ~ /^>/) {
-              h=substr($0,2)
-              split(h,a,/[\t ]/)
-              protected[a[1]]=1
+              h=substr($0,2); split(h,a,/[	 ]/); protected[a[1]]=1
             }
           }
         }
         /^>/ {
-          h=substr($0,2)
-          split(h,a,/[\t ]/)
-          keep=!(a[1] in protected)
+          h=substr($0,2); split(h,a,/[	 ]/); keep=!(a[1] in protected)
         }
         keep
         ' PFA="assemblies/protected.telomere.fa" assemblies/backbone.filtered.fa > assemblies/backbone.filtered.nodup.fa
@@ -1737,9 +1782,10 @@ PY
         cp -f "$backbone_fa" assemblies/backbone.filtered.nodup.fa
       fi
 
-      # Step 12C: telomere rescue using single-end telomeric contigs
       single_tel_src=""
-      if [[ -s single_tel_clean.fasta ]]; then
+      if [[ -s single_tel_best_clean.fasta ]]; then
+        single_tel_src="single_tel_best_clean.fasta"
+      elif [[ -s single_tel_clean.fasta ]]; then
         single_tel_src="single_tel_clean.fasta"
       elif [[ -s single_tel.fasta ]]; then
         single_tel_src="single_tel.fasta"
@@ -1757,96 +1803,50 @@ PY
           python3 - "$single_tel_src" assemblies/backbone.telomere_rescued.fa "$rescue_paf" assemblies/single_tel.replaced.ids assemblies/backbone.telomere_rescued.next.fa <<'PY'
 import sys
 from pathlib import Path
-
-single_fa = Path(sys.argv[1])
-backbone_fa = Path(sys.argv[2])
-paf = Path(sys.argv[3])
-out_ids = Path(sys.argv[4])
-out_fa = Path(sys.argv[5])
-
-min_ident = 0.95
-min_cov = 0.90
-min_ext = 1000
-
+single_fa=Path(sys.argv[1]); backbone_fa=Path(sys.argv[2]); paf=Path(sys.argv[3]); out_ids=Path(sys.argv[4]); out_fa=Path(sys.argv[5])
+min_ident=0.90; min_cov=0.80; min_ext=500
 def read_fa(path):
-    seqs = {}
-    name = None
-    buf = []
+    seqs={}; name=None; buf=[]
     with open(path) as f:
         for ln in f:
             if ln.startswith(">"):
-                if name is not None:
-                    seqs[name] = "".join(buf)
-                name = ln[1:].strip().split()[0]
-                buf = []
-            else:
-                buf.append(ln.strip())
-        if name is not None:
-            seqs[name] = "".join(buf)
+                if name is not None: seqs[name]="".join(buf)
+                name=ln[1:].strip().split()[0]; buf=[]
+            else: buf.append(ln.strip())
+        if name is not None: seqs[name]="".join(buf)
     return seqs
-
-single = read_fa(single_fa)
-backbone = read_fa(backbone_fa)
-
-best = {}
+single=read_fa(single_fa); backbone=read_fa(backbone_fa)
+best={}
 for ln in open(paf):
-    if not ln.strip() or ln.startswith("#"):
-        continue
-    p = ln.rstrip().split("\t")
-    if len(p) < 12:
-        continue
-
-    qname = p[0]
-    qlen = int(p[1])
-    qs = int(p[2])
-    qe = int(p[3])
-    tname = p[5]
-    matches = int(p[9])
-    alnlen = int(p[10])
-
-    if qname not in single or tname not in backbone:
-        continue
-    if alnlen <= 0 or qlen <= 0:
-        continue
-
-    ident = matches / max(1, alnlen)
-    cov_q = (qe - qs) / max(1, qlen)
-    left_overhang = qs
-    right_overhang = qlen - qe
-    ext = max(left_overhang, right_overhang)
-
-    if ident < min_ident or cov_q < min_cov or ext < min_ext:
-        continue
-
-    cur = best.get(tname)
-    score = (ext, ident, cov_q, qname)
-    if cur is None or score > cur[0]:
-        best[tname] = (score, qname)
-
-replaced = set()
+    if not ln.strip() or ln.startswith("#"): continue
+    p=ln.rstrip().split("	")
+    if len(p)<12: continue
+    qname=p[0]; qlen=int(p[1]); qs=int(p[2]); qe=int(p[3]); tname=p[5]; matches=int(p[9]); alnlen=int(p[10])
+    if qname not in single or tname not in backbone or alnlen<=0 or qlen<=0: continue
+    ident=matches/max(1,alnlen); cov_q=(qe-qs)/max(1,qlen); ext=max(qs, qlen-qe)
+    if ident<min_ident or cov_q<min_cov or ext<min_ext: continue
+    cur=best.get(tname); score=(ext,ident,cov_q,len(single[qname]),qname)
+    if cur is None or score>cur[0]: best[tname]=(score,qname)
+replaced=set()
 with out_ids.open("w") as ids:
-    for tname, (_, qname) in sorted(best.items()):
-        replaced.add(tname)
-        ids.write(f"{tname}\t{qname}\n")
-
-used_single = set(qname for _, qname in best.values())
-
+    for tname,(_,qname) in sorted(best.items()):
+        replaced.add(tname); ids.write(f"{tname}	{qname}
+")
+used_single=set(qname for _,qname in best.values())
 with out_fa.open("w") as out:
     for qname in sorted(used_single):
-        seq = single[qname]
-        out.write(f">{qname}\n")
-        for i in range(0, len(seq), 60):
-            out.write(seq[i:i+60] + "\n")
-
-    for tname, seq in backbone.items():
-        if tname in replaced:
-            continue
-        out.write(f">{tname}\n")
-        for i in range(0, len(seq), 60):
-            out.write(seq[i:i+60] + "\n")
+        seq=single[qname]; out.write(f">{qname}
+")
+        for i in range(0,len(seq),60): out.write(seq[i:i+60]+"
+")
+    for tname,seq in backbone.items():
+        if tname in replaced: continue
+        out.write(f">{tname}
+")
+        for i in range(0,len(seq),60): out.write(seq[i:i+60]+"
+")
 PY
           check_command
-
           if [[ -s assemblies/backbone.telomere_rescued.next.fa ]]; then
             mv -f assemblies/backbone.telomere_rescued.next.fa assemblies/backbone.telomere_rescued.fa
           fi
@@ -1858,7 +1858,6 @@ PY
         cp -f assemblies/backbone.filtered.nodup.fa assemblies/backbone.telomere_rescued.fa
       fi
 
-      # Step 12D: remove rescued contigs redundant to protected set
       if [[ -s assemblies/protected.telomere.fa && -s assemblies/backbone.telomere_rescued.fa ]] && command -v minimap2 >/dev/null 2>&1; then
         dedup_paf="assemblies/rescued_vs_protected.paf"
         minimap2 -x asm20 -t "${threads:-8}" assemblies/protected.telomere.fa assemblies/backbone.telomere_rescued.fa > "$dedup_paf"
@@ -1866,76 +1865,46 @@ PY
 
         python3 - "$dedup_paf" assemblies/backbone.telomere_rescued.fa > assemblies/backbone.telomere_rescued.keep.ids <<'PY'
 import sys
-
-cov_thr = 0.95
-id_thr = 0.95
-best = {}
-
+cov_thr=0.95; id_thr=0.95; best={}
 with open(sys.argv[1]) as f:
     for ln in f:
-        if not ln.strip() or ln.startswith("#"):
-            continue
-        p = ln.rstrip().split("\t")
-        if len(p) < 12:
-            continue
-
-        qname = p[0]
-        qlen = int(p[1])
-        qs = int(p[2])
-        qe = int(p[3])
-        matches = int(p[9])
-        alnlen = int(p[10])
-
-        if qlen <= 0 or alnlen <= 0:
-            continue
-
-        ident = matches / max(1, alnlen)
-        cov = (qe - qs) / max(1, qlen)
-
-        cur = best.get(qname, (0.0, 0.0))
-        if cov > cur[0] or (abs(cov-cur[0]) < 1e-12 and ident > cur[1]):
-            best[qname] = (cov, ident)
-
-drop = {q for q, (cov, ident) in best.items() if cov >= cov_thr and ident >= id_thr}
-
-keep = []
+        if not ln.strip() or ln.startswith("#"): continue
+        p=ln.rstrip().split("	")
+        if len(p)<12: continue
+        qname=p[0]; qlen=int(p[1]); qs=int(p[2]); qe=int(p[3]); matches=int(p[9]); alnlen=int(p[10])
+        if qlen<=0 or alnlen<=0: continue
+        ident=matches/max(1,alnlen); cov=(qe-qs)/max(1,qlen)
+        cur=best.get(qname,(0.0,0.0))
+        if cov>cur[0] or (abs(cov-cur[0])<1e-12 and ident>cur[1]): best[qname]=(cov,ident)
+drop={q for q,(cov,ident) in best.items() if cov>=cov_thr and ident>=id_thr}
+keep=[]
 with open(sys.argv[2]) as f:
-    name = None
+    name=None
     for ln in f:
         if ln.startswith(">"):
-            if name is not None and name not in drop:
-                keep.append(name)
-            name = ln[1:].strip().split()[0]
-    if name is not None and name not in drop:
-        keep.append(name)
-
-print("\n".join(keep))
+            if name is not None and name not in drop: keep.append(name)
+            name=ln[1:].strip().split()[0]
+    if name is not None and name not in drop: keep.append(name)
+print("
+".join(keep))
 PY
         check_command
 
         python3 - assemblies/backbone.telomere_rescued.keep.ids assemblies/backbone.telomere_rescued.fa assemblies/backbone.telomere_rescued.dedup.fa <<'PY'
 import sys
-ids_file, inp, outp = sys.argv[1:4]
-
-with open(ids_file) as f:
-    ids = {ln.strip() for ln in f if ln.strip()}
-
-with open(inp) as f, open(outp, "w") as o:
-    name = None
-    seq = []
-
+ids={ln.strip() for ln in open(sys.argv[1]) if ln.strip()}
+with open(sys.argv[2]) as f, open(sys.argv[3],"w") as o:
+    name=None; seq=[]
     def flush():
         if name is not None and name in ids:
-            o.write(f">{name}\n")
-            s = "".join(seq)
-            for i in range(0, len(s), 60):
-                o.write(s[i:i+60] + "\n")
-
+            o.write(f">{name}
+")
+            s="".join(seq)
+            for i in range(0,len(s),60): o.write(s[i:i+60]+"
+")
     for ln in f:
         if ln.startswith(">"):
-            flush()
-            name = ln[1:].strip().split()[0]
-            seq = []
+            flush(); name=ln[1:].strip().split()[0]; seq=[]
         else:
             seq.append(ln.strip())
     flush()
@@ -1945,7 +1914,6 @@ PY
         cp -f assemblies/backbone.telomere_rescued.fa assemblies/backbone.telomere_rescued.dedup.fa
       fi
 
-      # Step 12E: combine protected contigs + rescued backbone
       if [[ -s assemblies/protected.telomere.fa && -s assemblies/backbone.telomere_rescued.dedup.fa ]]; then
         cat assemblies/protected.telomere.fa assemblies/backbone.telomere_rescued.dedup.fa > assemblies/final_merge.raw.fasta
       elif [[ -s assemblies/protected.telomere.fa ]]; then
@@ -1967,6 +1935,7 @@ PY
       cp -f "merged_${assembler}_sort.fa" "assemblies/final.merged.fasta"
       echo "[ok] Wrote assemblies/final.merged.fasta"
       ;;
+
     13)
       echo "Step 13 - BUSCO analysis"
 
@@ -2151,17 +2120,12 @@ PY
       seqtk telo -s 1 -m "${motif:-TTAGGG}" "$final_fa" > "$list"
       check_command
 
-      # Any contig with telomere support on at least one end
       awk -v w="$tel_window" '
-        NF>=4 {
-          gsub(/\r/, "")
-        }
+        NF>=4 { gsub(/
+/, "") }
         NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-          c=$1
-          sub(/[ \t].*$/, "", c)
-          left=$2
-          right=$3
-          len=$4
+          c=$1; sub(/[ 	].*$/, "", c)
+          left=$2; right=$3; len=$4
           if (left <= w || (len - right) <= w) print c
         }
       ' "$list" | sort -u > "$ids"
@@ -2175,44 +2139,56 @@ PY
       fi
 
       double=$(awk -v w="$tel_window" '
-        NF>=4 {
-          gsub(/\r/, "")
-        }
+        NF>=4 { gsub(/
+/, "") }
         NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-          c=$1
-          sub(/[ \t].*$/, "", c)
-          left=$2
-          right=$3
-          len=$4
-          has_left  = (left <= w)
-          has_right = ((len - right) <= w)
+          c=$1; sub(/[ 	].*$/, "", c)
+          left=$2; right=$3; len=$4
+          has_left=(left <= w); has_right=((len - right) <= w)
           if (has_left && has_right) print c
         }
       ' "$list" | sort -u | wc -l)
 
       single=$(awk -v w="$tel_window" '
-        NF>=4 {
-          gsub(/\r/, "")
-        }
+        NF>=4 { gsub(/
+/, "") }
         NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-          c=$1
-          sub(/[ \t].*$/, "", c)
-          left=$2
-          right=$3
-          len=$4
-          has_left  = (left <= w)
-          has_right = ((len - right) <= w)
+          c=$1; sub(/[ 	].*$/, "", c)
+          left=$2; right=$3; len=$4
+          has_left=(left <= w); has_right=((len - right) <= w)
           if ((has_left + has_right) == 1) print c
         }
       ' "$list" | sort -u | wc -l)
+
+      total_supported=$(( ${double:-0} + ${single:-0} ))
+
+      protected_mode="none"
+      [[ -s protected_telomere_mode.txt ]] && protected_mode="$(cat protected_telomere_mode.txt)"
+
+      strict_pool_n=$(grep -c '^>' t2t_clean.fasta 2>/dev/null || echo 0)
+      single_best_pool_n=$(grep -c '^>' single_tel_best_clean.fasta 2>/dev/null || echo 0)
+      tel_pool_n=$(grep -c '^>' telomere_supported_best_clean.fasta 2>/dev/null || echo 0)
+
+      rescue_n=0
+      if [[ -s assemblies/single_tel.replaced.ids ]]; then
+        rescue_n=$(wc -l < assemblies/single_tel.replaced.ids 2>/dev/null || echo 0)
+      fi
 
       {
         echo "Metric,merged"
         echo "Telomere double-end contigs,${double:-0}"
         echo "Telomere single-end contigs,${single:-0}"
+        echo "Telomere-supported contigs,${total_supported:-0}"
+        echo "Protected telomere mode,${protected_mode}"
+        echo "Step10 strict T2T pool contigs,${strict_pool_n:-0}"
+        echo "Step10 best single-end telomere pool contigs,${single_best_pool_n:-0}"
+        echo "Step10 optimized telomere-supported pool contigs,${tel_pool_n:-0}"
+        echo "Step12 rescued telomere replacements,${rescue_n:-0}"
       } > "$csv"
+
       echo "[ok] Wrote $(basename "$csv")"
       ;;
+
     15)
       echo "Step 15 - QUAST metrics for final assembly"
 
@@ -2316,8 +2292,9 @@ PY
     16)
       echo "Step 16 - Final assembly comparison"
 
-      MERQURY_ENABLE="${MERQURY_ENABLE:-0}"
-      MERQURY_DB="${MERQURY_DB:-}"
+      MERQURY_ENABLE=0
+      [[ "${merqury_enable:-false}" == true ]] && MERQURY_ENABLE=1
+      MERQURY_DB="${merqury_db:-}"
 
       if [[ "$MERQURY_ENABLE" -eq 1 ]]; then
         if [[ -z "$MERQURY_DB" ]]; then
@@ -2345,20 +2322,17 @@ PY
 
       mkdir -p final_results
 
-      # Always write merged.merqury.csv so downstream logic is consistent
       python3 - <<'PY'
 import os, csv, re
-
 qv_file = os.path.join("merqury", "final.qv")
 comp_file = os.path.join("merqury", "final.completeness.stats")
-
 def parse_first_float(path):
     if not os.path.exists(path):
         return ""
     txt = open(path, "r", errors="ignore").read()
     patterns = [
-        r'(?i)\bqv\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
-        r'(?i)\bcompleteness\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)qv[^0-9]*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)completeness[^0-9]*([0-9]+(?:\.[0-9]+)?)',
         r'([0-9]+(?:\.[0-9]+)?)'
     ]
     for pat in patterns:
@@ -2366,185 +2340,124 @@ def parse_first_float(path):
         if m:
             return m.group(1)
     return ""
-
-qv = parse_first_float(qv_file)
-comp = parse_first_float(comp_file)
-
+qv = parse_first_float(qv_file); comp = parse_first_float(comp_file)
 with open("assemblies/merged.merqury.csv", "w", newline="") as f:
-    csv.writer(f).writerows([
-        ["Metric", "merged"],
-        ["Merqury QV", qv],
-        ["Merqury completeness (%)", comp],
-    ])
-
+    csv.writer(f).writerows([["Metric","merged"],["Merqury QV",qv],["Merqury completeness (%)",comp]])
 print("Wrote assemblies/merged.merqury.csv")
 PY
 
       python3 - <<'PY'
 import os, csv
 from collections import OrderedDict
-
 TEL_WINDOW = int(os.getenv("TEL_WINDOW", "100"))
-
-FINAL_FILES = [
-    ("telo",    "assemblies/merged.telo.csv"),
-    ("busco",   "assemblies/merged.busco.csv"),
-    ("quast",   "assemblies/merged.quast.csv"),
-    ("merqury", "assemblies/merged.merqury.csv"),
-]
-
-ASM_INFO = "assemblies/assembly_info.csv"
-DECISION_FILE = "assemblies/selection_decision.txt"
-OUT = "final_results/final_result.csv"
-
+FINAL_FILES=[("telo","assemblies/merged.telo.csv"),("busco","assemblies/merged.busco.csv"),("quast","assemblies/merged.quast.csv"),("merqury","assemblies/merged.merqury.csv")]
+ASM_INFO="assemblies/assembly_info.csv"
+DECISION_FILE="assemblies/selection_decision.txt"
+OUT="final_results/final_result.csv"
 def read_metric_merged(path):
-    rows = []
-    if not os.path.exists(path):
-        return rows
-    with open(path, newline="") as f:
-        r = csv.reader(f)
-        hdr = next(r, None)
-        if not hdr or len(hdr) < 2:
-            return rows
-        idx_metric = None
-        idx_merged = None
-        for i, h in enumerate(hdr):
-            name = (h or "").strip().lower()
-            if name == "metric":
-                idx_metric = i
-            if name == "merged":
-                idx_merged = i
-        if idx_metric is None:
-            idx_metric = 0
-        if idx_merged is None:
-            idx_merged = 1 if len(hdr) > 1 else 0
+    rows=[]
+    if not os.path.exists(path): return rows
+    with open(path,newline="") as f:
+        r=csv.reader(f); hdr=next(r,None)
+        if not hdr or len(hdr)<2: return rows
+        idx_metric=0; idx_merged=1
+        for i,h in enumerate(hdr):
+            name=(h or "").strip().lower()
+            if name=="metric": idx_metric=i
+            if name=="merged": idx_merged=i
         for row in r:
-            if not row:
-                continue
-            m = (row[idx_metric] if idx_metric < len(row) else "").strip()
-            v = (row[idx_merged] if idx_merged < len(row) else "").strip()
-            if m:
-                rows.append((m, v))
+            if not row: continue
+            m=(row[idx_metric] if idx_metric < len(row) else "").strip()
+            v=(row[idx_merged] if idx_merged < len(row) else "").strip()
+            if m: rows.append((m,v))
     return rows
-
 def read_assembly_info(path):
-    if not os.path.exists(path):
-        return None, None
-    with open(path, newline="") as f:
-        r = csv.reader(f)
-        hdr = next(r, None)
-        if not hdr:
-            return None, None
-        hdr = list(hdr)
-        hdr[0] = "Metric"
-        body = [row for row in r if row]
-    return hdr, body
-
+    if not os.path.exists(path): return None,None
+    with open(path,newline="") as f:
+        r=csv.reader(f); hdr=next(r,None)
+        if not hdr: return None,None
+        hdr=list(hdr); hdr[0]="Metric"; body=[row for row in r if row]
+    return hdr,body
 def compute_telo_counts(list_path, tel_window=100):
     try:
-        s = {}
-        e = {}
-        with open(list_path, 'r', newline='') as f:
+        s={}; e={}
+        with open(list_path,'r',newline='') as f:
             for line in f:
-                line = line.strip().replace('\r', '')
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                c = parts[0]
+                line=line.strip().replace('
+','')
+                if not line: continue
+                parts=line.split()
+                if len(parts)<4: continue
+                c=parts[0]
                 try:
-                    a = int(parts[1])
-                    b = int(parts[2])
-                    L = int(parts[3])
+                    a=int(parts[1]); b=int(parts[2]); L=int(parts[3])
                 except ValueError:
                     continue
-
-                has_left = (a <= tel_window)
-                has_right = ((L - b) <= tel_window)
-
-                s[c] = 1 if has_left else 0
-                e[c] = 1 if has_right else 0
-
-        keys = set(s) | set(e)
-        double = sum(1 for k in keys if s.get(k, 0) > 0 and e.get(k, 0) > 0)
-        single = sum(1 for k in keys if (s.get(k, 0) + e.get(k, 0)) == 1)
-        return str(double), str(single)
+                has_left=(a <= tel_window); has_right=((L-b) <= tel_window)
+                s[c]=1 if has_left else 0; e[c]=1 if has_right else 0
+        keys=set(s)|set(e); double=sum(1 for k in keys if s.get(k,0)>0 and e.get(k,0)>0); single=sum(1 for k in keys if (s.get(k,0)+e.get(k,0))==1); total=double+single
+        return str(double),str(single),str(total)
     except Exception:
         return None
-
-final_map = OrderedDict()
-order_seen = []
-
-for _, p in FINAL_FILES:
-    for m, v in read_metric_merged(p):
-        if m not in final_map:
-            order_seen.append(m)
-        final_map[m] = v
-
-_tcounts = compute_telo_counts("assemblies/final.telo.list", TEL_WINDOW)
+def count_fasta(path):
+    try:
+        with open(path) as f: return str(sum(1 for ln in f if ln.startswith(">")))
+    except Exception: return ""
+final_map=OrderedDict(); order_seen=[]
+for _,p in FINAL_FILES:
+    for m,v in read_metric_merged(p):
+        if m not in final_map: order_seen.append(m)
+        final_map[m]=v
+_tcounts=compute_telo_counts("assemblies/final.telo.list", TEL_WINDOW)
 if _tcounts is not None:
-    _d, _s = _tcounts
-    final_map["Telomere double-end contigs"] = _d
-    final_map["Telomere single-end contigs"] = _s
-
+    _d,_s,_t=_tcounts
+    final_map["Telomere double-end contigs"]=_d
+    final_map["Telomere single-end contigs"]=_s
+    final_map["Telomere-supported contigs"]=_t
 if os.path.exists(DECISION_FILE):
     with open(DECISION_FILE) as f:
         for line in f:
-            line = line.rstrip("\n")
-            if not line:
-                continue
-            k, *rest = line.split("\t", 1)
-            v = rest[0] if rest else ""
-            if k == "selected_score":
-                final_map["Selection score"] = v
-            elif k == "selected_assembler":
-                final_map["Selected assembler"] = v
-            elif k == "auto_mode":
-                final_map["Auto-selection mode"] = v
-            elif k == "score_formula":
-                final_map["Score formula"] = v
-
-hdr, body = read_assembly_info(ASM_INFO)
-
+            line=line.rstrip("
+")
+            if not line: continue
+            k,*rest=line.split("	",1); v=rest[0] if rest else ""
+            if k=="selected_score": final_map["Selection score"]=v
+            elif k=="selected_assembler": final_map["Selected assembler"]=v
+            elif k=="auto_mode": final_map["Auto-selection mode"]=v
+            elif k=="score_formula": final_map["Score formula"]=v
+if os.path.exists("protected_telomere_mode.txt"):
+    final_map["Protected telomere mode"]=open("protected_telomere_mode.txt").read().strip()
+final_map["Step10 strict T2T pool contigs"]=count_fasta("t2t_clean.fasta")
+final_map["Step10 best single-end telomere pool contigs"]=count_fasta("single_tel_best_clean.fasta")
+final_map["Step10 optimized telomere-supported pool contigs"]=count_fasta("telomere_supported_best_clean.fasta")
+try:
+    with open("assemblies/single_tel.replaced.ids") as f:
+        final_map["Step12 rescued telomere replacements"]=str(sum(1 for _ in f))
+except Exception:
+    final_map["Step12 rescued telomere replacements"]=""
+hdr,body=read_assembly_info(ASM_INFO)
 if hdr is not None:
-    if "merged" not in [h.lower() for h in hdr]:
-        hdr_out = list(hdr) + ["merged"]
-    else:
-        hdr_out = list(hdr)
-
-    metric_col = 0
-    out_rows = []
+    hdr_out=list(hdr)+(["merged"] if "merged" not in [h.lower() for h in hdr] else [])
+    out_rows=[]
     for row in body:
-        if len(row) < len(hdr_out) - 1:
-            row = row + [""] * (len(hdr_out) - 1 - len(row))
-        metric = (row[metric_col] if row else "").strip()
-        final_val = final_map.get(metric, "")
-        out_rows.append(row + [final_val])
-
-    present_metrics = set(r[0].strip() for r in body if r and r[0].strip())
-    for m in order_seen:
+        if len(row) < len(hdr_out)-1: row = row + [""]*(len(hdr_out)-1-len(row))
+        metric=(row[0] if row else "").strip()
+        out_rows.append(row + [final_map.get(metric,"")])
+    present_metrics=set(r[0].strip() for r in body if r and r[0].strip())
+    for m in final_map.keys():
         if m not in present_metrics:
-            r = [""] * len(hdr_out)
-            r[0] = m
-            r[-1] = final_map.get(m, "")
-            out_rows.append(r)
-
-    with open(OUT, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(hdr_out)
-        w.writerows(out_rows)
+            r=[""]*len(hdr_out); r[0]=m; r[-1]=final_map.get(m,""); out_rows.append(r)
+    with open(OUT,"w",newline="") as f:
+        w=csv.writer(f); w.writerow(hdr_out); w.writerows(out_rows)
 else:
-    with open(OUT, "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["Metric", "merged"])
-        for m in order_seen:
-            w.writerow([m, final_map.get(m, "")])
-
+    with open(OUT,"w",newline="") as f:
+        w=csv.writer(f); w.writerow(["Metric","merged"])
+        for m,v in final_map.items(): w.writerow([m,v])
 print(f"Wrote {OUT}")
 PY
       echo "[ok] Wrote final_results/final_result.csv"
       ;;
+
     17)
       echo "Step 17 - Cleanup temporary files"
 
@@ -2554,46 +2467,18 @@ PY
 
         mkdir -p temp/merge temp/merge/fasta temp/merge/param temp/busco temp/log final_results
 
-        find . -maxdepth 1 -type f -name 'aln_summary_merged*.tsv' \
-          -exec mv -f -- {} temp/merge/ \; 2>/dev/null || true
+        find . -maxdepth 1 -type f -name 'aln_summary_merged*.tsv' -exec mv -f -- {} temp/merge/ \; 2>/dev/null || true
+        find . -maxdepth 1 -type f -name 'anchor_summary_merged_*.txt' -exec mv -f -- {} temp/merge/ \; 2>/dev/null || true
 
-        find . -maxdepth 1 -type f -name 'anchor_summary_merged_*.txt' \
-          -exec mv -f -- {} temp/merge/ \; 2>/dev/null || true
-
-        find . -maxdepth 1 -type f \( \
-          -name '.merged_*' -o \
-          -name 'merged_*.delta' -o \
-          -name 'merged_*.coords' -o \
-          -name 'merged_*.snps' -o \
-          -name 'merged_*.delta.*' -o \
-          -name 'merged_*.crunch' -o \
-          -name 'merged_*.filter' -o \
-          -name 'merged_*.qdiff' -o \
-          -name 'merged_*.rdiff' -o \
-          -name 'merged_*.mcoords' \
-        \) -exec mv -f -- {} temp/merge/ \; 2>/dev/null || true
+        find . -maxdepth 1 -type f \(           -name '.merged_*' -o -name 'merged_*.delta' -o -name 'merged_*.coords' -o -name 'merged_*.snps' -o           -name 'merged_*.delta.*' -o -name 'merged_*.crunch' -o -name 'merged_*.filter' -o           -name 'merged_*.qdiff' -o -name 'merged_*.rdiff' -o -name 'merged_*.mcoords'         \) -exec mv -f -- {} temp/merge/ \; 2>/dev/null || true
 
         if [[ -d busco ]]; then
-          find busco -maxdepth 2 -type f -name '*.log' \
-            -exec mv -f -- {} temp/busco/ \; 2>/dev/null || true
+          find busco -maxdepth 2 -type f -name '*.log' -exec mv -f -- {} temp/busco/ \; 2>/dev/null || true
         fi
 
-        find . -maxdepth 1 -type f \( -name 'busco_*.log' -o -name '*busco*.log' \) \
-          -exec mv -f -- {} temp/busco/ \; 2>/dev/null || true
-
-        find . -maxdepth 1 -type f \( -name 'merged_*.fasta' -o -name 'merged_*.fa' \) \
-          -exec mv -f -- {} temp/merge/fasta/ \; 2>/dev/null || true
-
-        for f in merged_*; do
-          [[ -e "$f" && -f "$f" ]] || continue
-          case "$f" in
-            merged_*.fasta|merged_*.fa) continue ;;
-          esac
-          mv -f -- "$f" temp/merge/
-        done
-
-        find . -maxdepth 1 -type f -name 'param_summary_merged_*.txt' \
-          -exec mv -f -- {} temp/merge/param/ \; 2>/dev/null || true
+        find . -maxdepth 1 -type f \( -name 'busco_*.log' -o -name '*busco*.log' \) -exec mv -f -- {} temp/busco/ \; 2>/dev/null || true
+        find . -maxdepth 1 -type f \( -name 'merged_*.fasta' -o -name 'merged_*.fa' \) -exec mv -f -- {} temp/merge/fasta/ \; 2>/dev/null || true
+        find . -maxdepth 1 -type f -name 'param_summary_merged_*.txt' -exec mv -f -- {} temp/merge/param/ \; 2>/dev/null || true
 
         for f in *.log; do
           [[ -f "$f" ]] || continue
@@ -2601,15 +2486,94 @@ PY
           mv -f -- "$f" temp/log/
         done
 
-        # Preserve important final outputs
         mv -f -- assemblies/final.merged.fasta final_results/ 2>/dev/null || true
         mv -f -- assemblies/selection_debug.tsv final_results/ 2>/dev/null || true
         mv -f -- assemblies/selection_decision.txt final_results/ 2>/dev/null || true
+        mv -f -- assemblies/merged.merqury.csv final_results/ 2>/dev/null || true
+        mv -f -- assemblies/merged.busco.csv final_results/ 2>/dev/null || true
+        mv -f -- assemblies/merged.quast.csv final_results/ 2>/dev/null || true
+        mv -f -- assemblies/merged.telo.csv final_results/ 2>/dev/null || true
+        mv -f -- telomere_cluster_summary.tsv final_results/ 2>/dev/null || true
+        mv -f -- telomere_support_summary.csv final_results/ 2>/dev/null || true
+        mv -f -- protected_telomere_mode.txt final_results/ 2>/dev/null || true
 
         echo "[ok] Cleanup complete."
       }
 
       cleanup_temp
+      ;;
+    18)
+      echo "Step 18 - Assembly-only comparison summary"
+
+      mkdir -p assemblies merqury final_results
+
+      MERQURY_ENABLE=0
+      [[ "${merqury_enable:-false}" == true ]] && MERQURY_ENABLE=1
+      MERQURY_DB="${merqury_db:-}"
+
+      if [[ "$MERQURY_ENABLE" -eq 1 ]]; then
+        if [[ -z "$MERQURY_DB" ]]; then
+          for cand in reads.meryl meryl/reads.meryl merqury/reads.meryl *.meryl; do
+            [[ -e "$cand" ]] || continue
+            if [[ -d "$cand" ]]; then
+              MERQURY_DB="$cand"
+              break
+            fi
+          done
+        fi
+
+        if command -v merqury.sh >/dev/null 2>&1 && [[ -n "$MERQURY_DB" && -d "$MERQURY_DB" ]]; then
+          echo "[INFO] Running Merqury for assembly-only comparison using database: $MERQURY_DB"
+          log_version "merqury.sh" "merqury.sh" 2>/dev/null || true
+
+          declare -A asm_paths=(
+            [canu]="assemblies/canu.result.fasta"
+            [external]="assemblies/external.result.fasta"
+            [flye]="assemblies/flye.result.fasta"
+            [ipa]="assemblies/ipa.result.fasta"
+            [nextDenovo]="assemblies/nextDenovo.result.fasta"
+            [peregrine]="assemblies/peregrine.result.fasta"
+            [hifiasm]="assemblies/hifiasm.result.fasta"
+          )
+
+          for asm_name in canu external flye ipa nextDenovo peregrine hifiasm; do
+            asm_fa_i="${asm_paths[$asm_name]}"
+            [[ -s "$asm_fa_i" ]] || continue
+            if [[ ! -f "merqury/${asm_name}.qv" || ! -f "merqury/${asm_name}.completeness.stats" ]]; then
+              merqury.sh "$MERQURY_DB" "$asm_fa_i" "merqury/${asm_name}" || \
+                echo "[warn] Merqury failed for ${asm_name}" >&2
+            fi
+          done
+        else
+          echo "[warn] Merqury requested but merqury.sh or a valid .meryl database was not found; skipping Merqury." >&2
+        fi
+      else
+        echo "[INFO] Merqury disabled for assembly-only comparison"
+      fi
+
+      python3 - <<'PY'
+import os, csv, re
+assemblers = ["canu","external","flye","ipa","nextDenovo","peregrine","hifiasm"]
+rows = [["Metric"] + assemblers, ["Merqury QV"], ["Merqury completeness (%)"]]
+def parse_first_float(path):
+    if not os.path.exists(path): return ""
+    txt = open(path, "r", errors="ignore").read()
+    for pat in [r'(?i)qv[^0-9]*([0-9]+(?:\.[0-9]+)?)', r'(?i)completeness[^0-9]*([0-9]+(?:\.[0-9]+)?)', r'([0-9]+(?:\.[0-9]+)?)']:
+        m = re.search(pat, txt)
+        if m: return m.group(1)
+    return ""
+for asm in assemblers:
+    rows[1].append(parse_first_float(os.path.join("merqury", f"{asm}.qv")))
+    rows[2].append(parse_first_float(os.path.join("merqury", f"{asm}.completeness.stats")))
+with open("assemblies/assembly.merqury.csv", "w", newline="") as f:
+    csv.writer(f).writerows(rows)
+print("Wrote assemblies/assembly.merqury.csv")
+PY
+      build_assembly_info_v2
+      check_command
+      cp -f assemblies/assembly_info.csv final_results/assembly_only_result.csv 2>/dev/null || true
+      echo "[ok] Wrote assemblies/assembly_info.csv"
+      echo "[ok] Wrote final_results/assembly_only_result.csv"
       ;;
     esac
     echo "===== [$(timestamp)] STEP ${step} END ====="
