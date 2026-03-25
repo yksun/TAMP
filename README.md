@@ -2,10 +2,22 @@
 
 # TACO
 
-TACO (Telomere-Aware Contig Optimization) is a telomere-aware multi-assembler benchmarking and refinement pipeline for PacBio HiFi genome assembly. It runs multiple assemblers, summarizes assembly quality metrics, identifies strict telomere-to-telomere (T2T) and single-end telomeric contigs, and refines a selected backbone assembly using protected telomere contigs plus telomere-rescue logic.
+**Telomere-Aware Contig Optimization**
 
-TACO can optionally integrate **Merqury** for k-mer-based assembly quality evaluation when a read-derived `.meryl` database is available. When enabled, Merqury contributes QV and k-mer completeness metrics to backbone selection and final reporting. When disabled, TACO still performs telomere-aware refinement using BUSCO, QUAST, telomere support, contig count, and N50.
+TACO is a telomere-aware genome assembly workflow for benchmarking, comparing, and refining assemblies into improved chromosome-scale candidates. The pipeline was developed for small eukaryotic genomes, with a focus on fungal genomes and PacBio HiFi reads. It runs multiple assemblers, standardizes their outputs, evaluates assembly quality, detects telomere-supported contigs, and refines a selected backbone assembly by preserving protected telomere-supported contigs while reducing redundant non-telomeric sequence.
 
+TACO was developed at the **Grainger Bioinformatics Center, Field Museum of Natural History**.
+
+![Latest Version](https://img.shields.io/github/v/tag/yksun/TACO?label=Latest%20Version)
+![Last Commit](https://img.shields.io/github/last-commit/yksun/TACO)
+![Issues](https://img.shields.io/github/issues/yksun/TACO)
+![BioConda](https://img.shields.io/badge/BioConda-coming_soon-lightgrey)
+![Docker](https://img.shields.io/badge/Docker-coming_soon-lightgrey)
+![Singularity](https://img.shields.io/badge/Singularity-coming_soon-lightgrey)
+
+---
+
+<a id="table-of-contents"></a>
 ## Table of Contents
 
 - [Overview](#overview)
@@ -16,8 +28,6 @@ TACO can optionally integrate **Merqury** for k-mer-based assembly quality evalu
   - [Manual Installation (Recommended for Canu and Redundans)](#manual-installation)
 - [Usage](#usage)
 - [Assembly Selection Strategy](#assembly-selection-strategy)
-- [Merqury (Optional)](#merqury-optional)
-- [Logic Flow](#logic-flow)
   - [Basic Command](#basic-command)
   - [Parameters](#parameters)
   - [Example Run](#example-run)
@@ -162,9 +172,53 @@ TACO.sh -g 12m -t 16 --fastq /absolute/path/to/reads.fastq -m TGTG
 | `-s`, `--steps` | Run only selected steps, for example `1,3-5`. |
 | `--fasta` | External pre-assembled FASTA to include in the comparison. |
 | `--busco` | Run BUSCO and optionally set the lineage dataset. |
-| `--choose` | Prompt for the assembly to use in the final merge. |
+| `--choose` | Manually choose the assembler to use as the final refinement backbone. |
+| `--auto-mode smart` | Use the biologically informed automatic backbone scoring system that combines BUSCO, telomere support, optional Merqury metrics, contig count, and N50. |
+| `--auto-mode n50` | Use legacy automatic selection based only on the highest N50. |
+| `--merqury` | Enable optional Merqury scoring and reporting using an auto-detected `.meryl` database if available. |
+| `--merqury-db <reads.meryl>` | Enable Merqury and explicitly provide the path to a read-derived `.meryl` database. |
+| `--no-merqury` | Explicitly disable Merqury, even if `merqury.sh` and a `.meryl` database are present. |
 
 <a id="example-run"></a>
+
+### Parameter Details
+
+#### `--auto-mode smart`
+This is the default automatic selection mode. TACO scores candidate backbone assemblies using a composite metric that prioritizes biological completeness and chromosome-end support over contiguity alone:
+
+```text
+score =
+  BUSCO_C (%) x 1000
++ Telomere_double_end_contigs x 500
++ Telomere_single_end_contigs x 100
++ Merqury_completeness (%) x 200
++ Merqury_QV x 20
+- Number_of_contigs x 10
++ log10(N50) x 100
+```
+
+Use this mode when you want TACO to choose the backbone assembly automatically in a biologically informed way.
+
+#### `--auto-mode n50`
+This mode uses the highest N50 only. It is useful for reproducing older behavior or for quick continuity-only ranking, but it can favor assemblies with long contigs despite lower completeness.
+
+#### `--merqury`
+This enables optional Merqury integration. TACO will try to detect a usable read-derived `.meryl` database automatically from common locations such as `reads.meryl`, `meryl/reads.meryl`, or `merqury/reads.meryl`.
+
+When enabled, TACO:
+- runs Merqury on available assembler outputs before backbone selection,
+- adds Merqury QV and completeness to `assemblies/assembly_info.csv`,
+- uses those metrics in the smart backbone scoring system,
+- runs Merqury again on the final refined assembly,
+- and reports final Merqury metrics in `final_results/final_result.csv`.
+
+#### `--merqury-db <reads.meryl>`
+Use this when you want Merqury enabled and already know the exact path to the `.meryl` database that should be used. This is the most reproducible way to run Merqury within TACO.
+
+#### `--no-merqury`
+Use this to force TACO to skip Merqury, even if `merqury.sh` is installed and a `.meryl` database is present. This is useful for lightweight runs or when no trustworthy read-derived k-mer database is available.
+
+
 ### Example Run
 
 For *Saccharomyces cerevisiae* PacBio HiFi data:
@@ -340,43 +394,6 @@ TACO was developed at the Grainger Bioinformatics Center, Field Museum of Natura
 TACO was developed in the context of genome assembly benchmarking and telomere-aware assembly refinement workflows at the Grainger Bioinformatics Center, Field Museum of Natural History.
 
 
-
-## Merqury (Optional)
-
-TACO supports optional **Merqury** integration for k-mer-based assembly evaluation.
-
-### When to use it
-Enable Merqury when you have a read-derived `.meryl` database from the same sample used for assembly. This improves backbone ranking and final assembly reporting by adding:
-
-- **Merqury QV**
-- **Merqury completeness (%)**
-
-### Important note
-Merqury is **not required** for TACO to run. If `--merqury` is not used, or if `merqury.sh` / a valid `.meryl` database is not available, TACO will skip Merqury and continue normally.
-
-### Flags
-
-```bash
-# Enable Merqury and auto-detect a .meryl database
-TACO.sh --merqury ...
-
-# Enable Merqury with an explicit database path
-TACO.sh --merqury-db reads.meryl ...
-
-# Explicitly disable Merqury
-TACO.sh --no-merqury ...
-```
-
-### What TACO does with Merqury
-When enabled, TACO:
-1. Runs Merqury on each available assembler output before backbone selection.
-2. Adds Merqury QV and completeness to `assemblies/assembly.merqury.csv`.
-3. Merges those metrics into `assemblies/assembly_info.csv`.
-4. Uses them in the automatic backbone scoring system.
-5. Runs Merqury again on the final refined assembly.
-6. Adds final Merqury metrics to `final_results/final_result.csv`.
-
-
 ## Assembly Selection Strategy
 
 When `--choose` is not provided, TACO can automatically select the backbone assembly for final refinement.
@@ -428,27 +445,3 @@ During automatic selection, TACO reports the values used for scoring for each as
 ```text
 [DEBUG] canu: BUSCO=97.5 T2T=2 single=1 contigs=56 N50=785256 score=...
 ```
-
-
-
-## Logic Flow
-
-### Core workflow
-1. Run multiple assemblers on the same dataset.
-2. Summarize BUSCO, QUAST, telomere, and optional Merqury metrics.
-3. Build `assemblies/assembly_info.csv`.
-4. Select a backbone assembly using `--choose` or automatic scoring.
-5. Protect strict T2T or telomere-supported contigs when available.
-6. Rescue chromosome ends using single-end telomeric contigs.
-7. Deduplicate rescued contigs against protected contigs.
-8. Build and sort `assemblies/final.merged.fasta`.
-9. Generate final comparison outputs in `final_results/`.
-
-### Merqury-enabled flow
-When `--merqury` or `--merqury-db` is provided:
-1. TACO discovers or uses the specified `.meryl` database.
-2. Merqury evaluates each assembler output before backbone selection.
-3. Merqury metrics are added to `assembly_info.csv`.
-4. The smart score uses Merqury QV and completeness in backbone selection.
-5. Merqury is run again on the final refined assembly.
-6. Final Merqury metrics are reported in `final_results/final_result.csv`.
