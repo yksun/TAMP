@@ -62,7 +62,6 @@ chmod +x "$INSTALLER_DST"
 
 ENV_NAME="taco"
 
-# detect solver
 if command -v micromamba >/dev/null 2>&1; then
   SOLVER="micromamba"
 elif command -v conda >/dev/null 2>&1; then
@@ -89,9 +88,34 @@ create_env() {
   fi
 }
 
+run_in_env() {
+  if [[ "$SOLVER" == "micromamba" ]]; then
+    micromamba run -n "$ENV_NAME" "$@"
+  elif [[ "$SOLVER" == "conda" ]]; then
+    conda run -n "$ENV_NAME" "$@"
+  else
+    mamba run -n "$ENV_NAME" "$@"
+  fi
+}
+
 create_env
 
-# install redundans
+echo "[info] Verifying key commands in the taco environment"
+required_cmds=(minimap2 seqtk busco quast.py flye hifiasm canu merqury.sh meryl)
+missing=()
+for cmd in "${required_cmds[@]}"; do
+  if ! run_in_env bash -lc "command -v '$cmd' >/dev/null 2>&1"; then
+    missing+=("$cmd")
+  fi
+done
+
+if (( ${#missing[@]} > 0 )); then
+  echo "[warn] Missing commands in the taco environment: ${missing[*]}" >&2
+  echo "[warn] TACO may still run, but features depending on these tools will be skipped." >&2
+else
+  echo "[ok] Core TACO and Merqury commands detected in the taco environment"
+fi
+
 if ! command -v git >/dev/null 2>&1; then
   echo "[error] git is required to install redundans" >&2
   exit 1
@@ -118,14 +142,12 @@ else
   exit 1
 fi
 
-# wrapper
 cat > "$BIN_DIR/redundans.py" <<EOF
 #!/usr/bin/env bash
 exec "$REDUNDANS_DIR/redundans.py" "\$@"
 EOF
 chmod +x "$BIN_DIR/redundans.py"
 
-# TACO launcher
 cat > "$BIN_DIR/TACO.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -142,7 +164,6 @@ fi
 EOF
 chmod +x "$BIN_DIR/TACO.sh"
 
-# PATH
 BASHRC="$HOME/.bashrc"
 PATH_LINE='export PATH="$HOME/opt/bin:$PATH"'
 
@@ -158,3 +179,7 @@ echo
 echo "[ok] Installation complete"
 echo "[ok] Main app: $APP_DIR/TACO.sh"
 echo "[ok] Launcher: $BIN_DIR/TACO.sh"
+echo
+echo "[note] Merqury is installed in the taco environment, but TACO can only run Merqury"
+echo "[note] after you build or provide a read-derived .meryl database (for example reads.meryl)."
+echo "[note] The installer does not create reads.meryl because that requires your actual read set."

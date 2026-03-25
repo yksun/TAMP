@@ -1226,96 +1226,14 @@ print(f"Wrote {OUT}")
 PY
       echo "[ok] Wrote assemblies/assembly.quast.csv"
       ;;
-     12)
+    12)
       echo "Step 12 - Final assembly refinement with telomere-supported contig replacement"
-
-      # Step 12A: run Merqury on all assembler outputs if available
-      MERQURY_DB=""
-      for cand in reads.meryl meryl/reads.meryl merqury/reads.meryl *.meryl; do
-        [[ -e "$cand" ]] || continue
-        if [[ -d "$cand" ]]; then
-          MERQURY_DB="$cand"
-          break
-        fi
-      done
-
-      mkdir -p merqury assemblies
-
-      if command -v merqury.sh >/dev/null 2>&1 && [[ -n "$MERQURY_DB" ]]; then
-        echo "[INFO] Running Merqury pre-selection using database: $MERQURY_DB"
-        log_version "merqury.sh" "merqury.sh" 2>/dev/null || true
-
-        declare -A asm_paths=(
-          [canu]="assemblies/canu.result.fasta"
-          [external]="assemblies/external.result.fasta"
-          [flye]="assemblies/flye.result.fasta"
-          [ipa]="assemblies/ipa.result.fasta"
-          [nextDenovo]="assemblies/nextDenovo.result.fasta"
-          [peregrine]="assemblies/peregrine.result.fasta"
-          [hifiasm]="assemblies/hifiasm.result.fasta"
-        )
-
-        for asm_name in canu external flye ipa nextDenovo peregrine hifiasm; do
-          asm_fa_i="${asm_paths[$asm_name]}"
-          [[ -s "$asm_fa_i" ]] || continue
-          if [[ ! -f "merqury/${asm_name}.qv" || ! -f "merqury/${asm_name}.completeness.stats" ]]; then
-            merqury.sh "$MERQURY_DB" "$asm_fa_i" "merqury/${asm_name}" || \
-              echo "[warn] Merqury failed for ${asm_name}" >&2
-          fi
-        done
-      else
-        echo "[INFO] Merqury pre-selection not run (merqury.sh or .meryl database not found)"
-      fi
-
-      # Always write Merqury summary CSV so downstream steps are consistent
-      python3 - <<'PY'
-import os, csv, re
-
-assemblers = ["canu","external","flye","ipa","nextDenovo","peregrine","hifiasm"]
-rows = [
-    ["Metric"] + assemblers,
-    ["Merqury QV"],
-    ["Merqury completeness (%)"],
-]
-
-def parse_first_float(path):
-    if not os.path.exists(path):
-        return ""
-    txt = open(path, "r", errors="ignore").read()
-
-    # Prefer a labeled value if present
-    patterns = [
-        r'(?i)\bqv\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
-        r'(?i)\bcompleteness\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
-        r'([0-9]+(?:\.[0-9]+)?)'
-    ]
-    for pat in patterns:
-        m = re.search(pat, txt)
-        if m:
-            return m.group(1)
-    return ""
-
-for asm in assemblers:
-    qv_file = os.path.join("merqury", f"{asm}.qv")
-    comp_file = os.path.join("merqury", f"{asm}.completeness.stats")
-
-    qv = parse_first_float(qv_file)
-    comp = parse_first_float(comp_file)
-
-    rows[1].append(qv)
-    rows[2].append(comp)
-
-with open("assemblies/assembly.merqury.csv", "w", newline="") as f:
-    csv.writer(f).writerows(rows)
-
-print("Wrote assemblies/assembly.merqury.csv")
-PY
-
-      build_assembly_info_v2
 
       assembler=""
       CHOOSE_FLAG=0
       AUTO_MODE="smart"
+      MERQURY_ENABLE=0
+      MERQURY_DB=""
 
       while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1346,6 +1264,29 @@ PY
             AUTO_MODE="${1#--auto-mode=}"
             shift
             ;;
+          --merqury)
+            MERQURY_ENABLE=1
+            shift
+            ;;
+          --no-merqury)
+            MERQURY_ENABLE=0
+            shift
+            ;;
+          --merqury-db)
+            MERQURY_ENABLE=1
+            if [[ -n "${2:-}" && "${2#-}" == "$2" ]]; then
+              MERQURY_DB="$2"
+              shift 2
+            else
+              echo "[error] --merqury-db requires a path to a .meryl directory." >&2
+              exit 2
+            fi
+            ;;
+          --merqury-db=*)
+            MERQURY_ENABLE=1
+            MERQURY_DB="${1#--merqury-db=}"
+            shift
+            ;;
           *)
             break
             ;;
@@ -1353,6 +1294,92 @@ PY
       done
 
       echo "[info] Auto-selection mode: $AUTO_MODE"
+      echo "[info] Merqury enabled: $MERQURY_ENABLE"
+
+      mkdir -p merqury assemblies
+
+      # Step 12A: optional Merqury pre-selection for assembler ranking
+      if [[ "$MERQURY_ENABLE" -eq 1 ]]; then
+        if [[ -z "$MERQURY_DB" ]]; then
+          for cand in reads.meryl meryl/reads.meryl merqury/reads.meryl *.meryl; do
+            [[ -e "$cand" ]] || continue
+            if [[ -d "$cand" ]]; then
+              MERQURY_DB="$cand"
+              break
+            fi
+          done
+        fi
+
+        if command -v merqury.sh >/dev/null 2>&1 && [[ -n "$MERQURY_DB" && -d "$MERQURY_DB" ]]; then
+          echo "[INFO] Running Merqury pre-selection using database: $MERQURY_DB"
+          log_version "merqury.sh" "merqury.sh" 2>/dev/null || true
+
+          declare -A asm_paths=(
+            [canu]="assemblies/canu.result.fasta"
+            [external]="assemblies/external.result.fasta"
+            [flye]="assemblies/flye.result.fasta"
+            [ipa]="assemblies/ipa.result.fasta"
+            [nextDenovo]="assemblies/nextDenovo.result.fasta"
+            [peregrine]="assemblies/peregrine.result.fasta"
+            [hifiasm]="assemblies/hifiasm.result.fasta"
+          )
+
+          for asm_name in canu external flye ipa nextDenovo peregrine hifiasm; do
+            asm_fa_i="${asm_paths[$asm_name]}"
+            [[ -s "$asm_fa_i" ]] || continue
+            if [[ ! -f "merqury/${asm_name}.qv" || ! -f "merqury/${asm_name}.completeness.stats" ]]; then
+              merqury.sh "$MERQURY_DB" "$asm_fa_i" "merqury/${asm_name}" || \
+                echo "[warn] Merqury failed for ${asm_name}" >&2
+            fi
+          done
+        else
+          echo "[warn] Merqury requested but merqury.sh or a valid .meryl database was not found; skipping Merqury." >&2
+        fi
+      else
+        echo "[INFO] Merqury disabled for this run"
+      fi
+
+      # Always write Merqury summary CSV so downstream logic remains consistent
+      python3 - <<'PY'
+import os, csv, re
+
+assemblers = ["canu","external","flye","ipa","nextDenovo","peregrine","hifiasm"]
+rows = [
+    ["Metric"] + assemblers,
+    ["Merqury QV"],
+    ["Merqury completeness (%)"],
+]
+
+def parse_first_float(path):
+    if not os.path.exists(path):
+        return ""
+    txt = open(path, "r", errors="ignore").read()
+    patterns = [
+        r'(?i)\bqv\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
+        r'(?i)\bcompleteness\b[^0-9]*([0-9]+(?:\.[0-9]+)?)',
+        r'([0-9]+(?:\.[0-9]+)?)'
+    ]
+    for pat in patterns:
+        m = re.search(pat, txt)
+        if m:
+            return m.group(1)
+    return ""
+
+for asm in assemblers:
+    qv_file = os.path.join("merqury", f"{asm}.qv")
+    comp_file = os.path.join("merqury", f"{asm}.completeness.stats")
+    qv = parse_first_float(qv_file)
+    comp = parse_first_float(comp_file)
+    rows[1].append(qv)
+    rows[2].append(comp)
+
+with open("assemblies/assembly.merqury.csv", "w", newline="") as f:
+    csv.writer(f).writerows(rows)
+
+print("Wrote assemblies/assembly.merqury.csv")
+PY
+
+      build_assembly_info_v2
 
       # Auto-select assembler if --choose not provided
       if [[ $CHOOSE_FLAG -eq 0 && -z "$assembler" ]]; then
@@ -1535,7 +1562,6 @@ PY
         exit 1
       fi
 
-      # v0.5.0 telomere-aware protection / replacement logic
       protected_fasta=""
       protected_mode="none"
 
@@ -2290,34 +2316,38 @@ PY
     16)
       echo "Step 16 - Final assembly comparison"
 
-      # Final Merqury for refined assembly
-      MERQURY_DB=""
-      for cand in reads.meryl meryl/reads.meryl merqury/reads.meryl *.meryl; do
-        [[ -e "$cand" ]] || continue
-        if [[ -d "$cand" ]]; then
-          MERQURY_DB="$cand"
-          break
+      MERQURY_ENABLE="${MERQURY_ENABLE:-0}"
+      MERQURY_DB="${MERQURY_DB:-}"
+
+      if [[ "$MERQURY_ENABLE" -eq 1 ]]; then
+        if [[ -z "$MERQURY_DB" ]]; then
+          for cand in reads.meryl meryl/reads.meryl merqury/reads.meryl *.meryl; do
+            [[ -e "$cand" ]] || continue
+            if [[ -d "$cand" ]]; then
+              MERQURY_DB="$cand"
+              break
+            fi
+          done
         fi
-      done
+
+        if command -v merqury.sh >/dev/null 2>&1 && [[ -n "$MERQURY_DB" && -d "$MERQURY_DB" ]]; then
+          echo "[INFO] Running Merqury on final assembly"
+          mkdir -p merqury
+          log_version "merqury.sh" "merqury.sh" 2>/dev/null || true
+          merqury.sh "$MERQURY_DB" assemblies/final.merged.fasta "merqury/final" || \
+            echo "[warn] Merqury failed on final assembly" >&2
+        else
+          echo "[warn] Merqury requested for final assembly but merqury.sh or .meryl database was not found; skipping." >&2
+        fi
+      else
+        echo "[INFO] Merqury disabled for final assembly comparison"
+      fi
 
       mkdir -p final_results
-
-      if command -v merqury.sh >/dev/null 2>&1 && [[ -n "$MERQURY_DB" ]]; then
-        echo "[INFO] Running Merqury on final assembly"
-        mkdir -p merqury
-        log_version "merqury.sh" "merqury.sh" 2>/dev/null || true
-        merqury.sh "$MERQURY_DB" assemblies/final.merged.fasta "merqury/final" || \
-          echo "[warn] Merqury failed on final assembly" >&2
-      else
-        echo "[INFO] Merqury not run for final assembly (merqury.sh or .meryl database not found)"
-      fi
 
       # Always write merged.merqury.csv so downstream logic is consistent
       python3 - <<'PY'
 import os, csv, re
-
-qv = ""
-comp = ""
 
 qv_file = os.path.join("merqury", "final.qv")
 comp_file = os.path.join("merqury", "final.completeness.stats")
@@ -2575,10 +2605,6 @@ PY
         mv -f -- assemblies/final.merged.fasta final_results/ 2>/dev/null || true
         mv -f -- assemblies/selection_debug.tsv final_results/ 2>/dev/null || true
         mv -f -- assemblies/selection_decision.txt final_results/ 2>/dev/null || true
-        mv -f -- assemblies/merged.merqury.csv final_results/ 2>/dev/null || true
-        mv -f -- assemblies/merged.busco.csv final_results/ 2>/dev/null || true
-        mv -f -- assemblies/merged.quast.csv final_results/ 2>/dev/null || true
-        mv -f -- assemblies/merged.telo.csv final_results/ 2>/dev/null || true
 
         echo "[ok] Cleanup complete."
       }

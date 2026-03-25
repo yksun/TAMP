@@ -26,7 +26,6 @@ dependencies:
   - quast
   - merqury
   - meryl
-  
 
   # misc tools used in pipeline
   - funannotate
