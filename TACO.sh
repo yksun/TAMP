@@ -3,58 +3,7 @@ if [ -z "$BASH_VERSION" ]; then
   exec /usr/bin/env bash "$0" "$@"
 fi
 
-# v0.5.3
-# - MAJOR CHANGE (Step 10): Reworked telomere-pool construction from seqtk telo
-#   coordinate output. Contigs are now separated into biologically distinct classes:
-#   strict T2T contigs, best single-end telomeric contigs, and optimized telomere-supported contigs.
-#
-# - MAJOR CHANGE (Step 10): Preserved the strict meaning of t2t.fasta.
-#   It contains only true double-end telomere-to-telomere contigs.
-#   Best single-end telomeric representatives are written to single_tel_best.fasta,
-#   and the optimized combined pool is written to telomere_supported_best.fasta.
-#
-# - MAJOR CHANGE (Step 10): Added redundancy reduction for single-end telomeric contigs
-#   using all-vs-all minimap2 clustering and longest-representative selection.
-#
-# - MAJOR CHANGE (Step 10): Updated protected telomere-pool priority to:
-#   strict T2T > best single-end telomeric representatives > optimized telomere-supported pool.
-#
-# - MAJOR CHANGE (Step 12): Replaced older final merge behavior with cleaned backbone
-#   refinement logic. The selected assembler output is used as the backbone assembly,
-#   while redundant backbone contigs can be replaced or rescued using the optimized telomere pool.
-#
-# - MAJOR CHANGE (Step 12): Added support for optional automatic backbone selection modes:
-#   smart scoring or legacy N50-only selection.
-#
-# - CHANGE (Step 12): Increased telomere contribution in smart backbone scoring to better
-#   reflect telomere-end retention during final assembly refinement.
-#
-# - CHANGE (Step 12): Added optional Merqury integration for assembler ranking and final
-#   reporting when --merqury or --merqury-db is supplied.
-#
-# - FIX (Step 12): Improved fungal single-end telomere rescue by relaxing terminal overhang,
-#   alignment identity, and coverage thresholds.
-#
-# - CHANGE (Step 12): Telomere rescue now prioritizes single_tel_best_clean.fasta as the
-#   preferred rescue pool before falling back to broader telomeric sets.
-#
-# - CHANGE (Step 14): Updated final telomere analysis to report strict T2T, single-end,
-#   total telomere-supported contigs, protected telomere mode, and rescue counts.
-#
-# - CHANGE (Step 16): Updated final comparison reporting to include Merqury metrics,
-#   telomere-pool statistics, rescue counts, selection score, selected assembler,
-#   auto-selection mode, and score formula in final_results/final_result.csv.
-#
-# - CHANGE (Step 18): Added assembly-only mode to run assembler benchmarking/comparison
-#   without final telomere-aware refinement, while still generating assemblies/assembly_info.csv
-#   and optional Merqury comparison output.
-#
-# - FIX: Removed duplicated old parser/selection code, aligned usage text with current logic,
-#   and cleaned older command fragments left from pre-0.5.x versions.
-#
-# - DESIGN UPDATE: TACO now follows a telomere-pool optimization and backbone-refinement
-#   strategy rather than repeated structural merging, improving chromosome-end retention
-#   while reducing non-telomeric redundancy.
+PROJECT_ROOT="$(pwd)"
 
 # ===== Version logging helpers =====
 VERSION_FILE="${VERSION_FILE:-version.txt}"
@@ -517,6 +466,22 @@ if [[ "$assembly_only" == true ]]; then
   expand_steps "1-9,11,18"
 fi
 
+check_single_env_requirements() {
+  local cmds=(python3 canu nextDenovo pg_asm ipa flye hifiasm seqtk busco minimap2 bwa samtools funannotate redundans.py merge_wrapper.py)
+  local missing=()
+  for cmd in "${cmds[@]}"; do
+    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+  done
+  if ! command -v quast.py >/dev/null 2>&1 && ! command -v quast >/dev/null 2>&1; then
+    missing+=("quast.py/quast")
+  fi
+  if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "[error] Missing tools in the active conda environment: ${missing[*]}" >&2
+    echo "[error] Create and activate the unified TACO environment first, then rerun the pipeline." >&2
+    exit 127
+  fi
+}
+
 write_versions
 check_single_env_requirements
 
@@ -687,21 +652,7 @@ extract_by_list() {
   ' LST="$listfile" "$infa" > "$outfa"
 }
 
-check_single_env_requirements() {
-  local cmds=(python3 canu nextDenovo pg_asm ipa flye hifiasm seqtk busco minimap2 bwa samtools funannotate redundans.py merge_wrapper.py)
-  local missing=()
-  for cmd in "${cmds[@]}"; do
-    command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
-  done
-  if ! command -v quast.py >/dev/null 2>&1 && ! command -v quast >/dev/null 2>&1; then
-    missing+=("quast.py/quast")
-  fi
-  if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "[error] Missing tools in the active conda environment: ${missing[*]}" >&2
-    echo "[error] Create and activate the unified TACO environment first, then rerun the pipeline." >&2
-    exit 127
-  fi
-}
+
 
 echo "[info] Using the current active conda environment (single-env mode)."
 write_versions
@@ -1056,169 +1007,234 @@ PY
       echo "[ok] Wrote $(basename "$total_csv")"
       check_command
       ;;
-    10)
-      echo "Step 10 - Build optimized telomere contig pool"
+10)
+  echo "Step 10 - Build optimized telomere contig pool"
 
-      shopt -s nullglob
+  shopt -s nullglob
+  mkdir -p assemblies
 
-      fasta_files=(assemblies/*.telo.fasta)
-      if [[ ${#fasta_files[@]} -eq 0 ]]; then
-        echo "[info] No per-assembly *.telo.fasta files found; generating per-assembly telomere-contig FASTAs from ./assemblies/*.result.fasta using motif '${motif:-TTAGGG}'."
+  rm -f \
+    assemblies/protected_telomere_contigs.fasta \
+    assemblies/protected_telomere_mode.txt \
+    assemblies/final.telo.fasta \
+    assemblies/final.telo.list \
+    assemblies/final.telo.list.ids \
+    allmerged_telo.fasta \
+    allmerged_telo_sort.fasta \
+    allmerged.telo.list \
+    t2t.list \
+    single_tel.list \
+    telomere_supported.list \
+    t2t.fasta \
+    single_tel.fasta \
+    telomere_supported.fasta \
+    single_tel_best.ids \
+    single_tel_best.fasta \
+    telomere_supported_best.fasta \
+    t2t_clean.fasta \
+    single_tel_clean.fasta \
+    single_tel_best_clean.fasta \
+    telomere_supported_clean.fasta \
+    telomere_supported_best_clean.fasta \
+    telomere_cluster_summary.tsv \
+    telomere_support_summary.csv \
+    single_tel.self.paf \
+    merged_*.fasta \
+    merged_*.delta \
+    merged_*.rq.delta \
+    merged_*.ntref
 
-        for f in assemblies/*.result.fasta; do
-          [[ -s "$f" ]] || continue
-          base=$(basename "$f")
-          base="${base%.result.fasta}"
-          base="${base%.fasta}"
+  fasta_files=()
+  for f in assemblies/*.telo.fasta; do
+    [[ -s "$f" ]] || continue
+    [[ "$(basename "$f")" == "final.telo.fasta" ]] && continue
+    fasta_files+=("$f")
+  done
 
-          M="${motif:-TTAGGG}"
-          RC="$(echo "$M" | tr 'ACGTacgtnN' 'TGCAtgcanN' | rev)"
+  if [[ ${#fasta_files[@]} -eq 0 ]]; then
+    echo "[info] No non-empty per-assembly *.telo.fasta files found; generating them from ./assemblies/*.result.fasta using motif '${motif:-TTAGGG}'."
 
-          awk -v W="${TELO_WINDOW:-200}" -v R="${TELO_MIN_REPEATS:-3}" -v M="$M" -v RC="$RC" '
-            BEGIN { pat="(" M "|" RC "){" R ",}" }
-            /^>/ {
-              if (seq != "") {
-                left=substr(seq,1,W)
-                right=substr(seq,length(seq)-W+1,W)
-                if ((left ~ pat) || (right ~ pat)) {
-                  print header
-                  print seq
-                }
-              }
-              header=$0
-              seq=""
-              next
+    for f in assemblies/*.result.fasta; do
+      [[ -s "$f" ]] || continue
+      base=$(basename "$f")
+      base="${base%.result.fasta}"
+      base="${base%.fasta}"
+
+      M="${motif:-TTAGGG}"
+      RC="$(echo "$M" | tr 'ACGTacgtnN' 'TGCAtgcanN' | rev)"
+
+      awk -v W="${TELO_WINDOW:-200}" -v R="${TELO_MIN_REPEATS:-3}" -v M="$M" -v RC="$RC" '
+        BEGIN { pat="(" M "|" RC "){" R ",}" }
+        /^>/ {
+          if (seq != "") {
+            left=substr(seq,1,W)
+            right=substr(seq,length(seq)-W+1,W)
+            if ((left ~ pat) || (right ~ pat)) {
+              print header
+              print seq
             }
-            {
-              gsub(/[ \t\r\n]/,"")
-              seq=seq $0
+          }
+          header=$0
+          seq=""
+          next
+        }
+        {
+          gsub(/[ \t\r\n]/,"")
+          seq=seq $0
+        }
+        END {
+          if (seq != "") {
+            left=substr(seq,1,W)
+            right=substr(seq,length(seq)-W+1,W)
+            if ((left ~ pat) || (right ~ pat)) {
+              print header
+              print seq
             }
-            END {
-              if (seq != "") {
-                left=substr(seq,1,W)
-                right=substr(seq,length(seq)-W+1,W)
-                if ((left ~ pat) || (right ~ pat)) {
-                  print header
-                  print seq
-                }
-              }
-            }
-          ' "$f" > "assemblies/${base}.telo.fasta"
+          }
+        }
+      ' "$f" > "assemblies/${base}.telo.fasta"
 
-          [[ -s "assemblies/${base}.telo.fasta" ]] || rm -f "assemblies/${base}.telo.fasta"
+      [[ -s "assemblies/${base}.telo.fasta" ]] || rm -f "assemblies/${base}.telo.fasta"
 
-          if [[ -s "assemblies/${base}.telo.fasta" ]]; then
-            require_cmd seqtk
-            seqtk telo -s 1 -m "$motif" "assemblies/${base}.telo.fasta" > "assemblies/${base}.telo.list" || true
-          fi
-        done
-
-        fasta_files=(assemblies/*.telo.fasta)
-        if [[ ${#fasta_files[@]} -eq 0 ]]; then
-          echo "[error] Still no *.telo.fasta files after generation. Check Step 7 and motif '$motif'."
-          exit 1
-        fi
+      if [[ -s "assemblies/${base}.telo.fasta" ]]; then
+        require_cmd seqtk
+        seqtk telo -s 1 -m "$motif" "assemblies/${base}.telo.fasta" > "assemblies/${base}.telo.list" || true
       fi
+    done
 
-      fasta_files=(assemblies/*.telo.fasta)
+    fasta_files=()
+    for f in assemblies/*.telo.fasta; do
+      [[ -s "$f" ]] || continue
+      [[ "$(basename "$f")" == "final.telo.fasta" ]] && continue
+      fasta_files+=("$f")
+    done
 
-      if [[ ${#fasta_files[@]} -eq 1 ]]; then
-        echo "[info] Only one telo FASTA found: ${fasta_files[0]}"
-        cp -f "${fasta_files[0]}" allmerged_telo.fasta
-      else
-        rm -f merged_*.fasta
+    if [[ ${#fasta_files[@]} -eq 0 ]]; then
+      echo "[error] Still no non-empty *.telo.fasta files after generation. Check Step 7 and motif '$motif'."
+      exit 1
+    fi
+  fi
 
-        for ((i=0; i<${#fasta_files[@]}; i++)); do
-          for ((j=i+1; j<${#fasta_files[@]}; j++)); do
-            file1="${fasta_files[i]}"
-            file2="${fasta_files[j]}"
-            base1=$(basename "$file1" .telo.fasta)
-            base2=$(basename "$file2" .telo.fasta)
+  echo "[INFO] Step 10 donor FASTAs:"
+  printf '  %s\n' "${fasta_files[@]}"
 
-            require_cmd merge_wrapper.py
-            log_version "merge_wrapper.py" "merge_wrapper.py" 2>/dev/null || true
-            merge_wrapper.py -l 1000000 "$file1" "$file2" --prefix merged_"$base1"_"$base2"
-            check_command
-          done
-        done
+  rm -f merged_*.fasta merged_*.delta merged_*.rq.delta merged_*.ntref
 
-        merged_list=(merged_*.fasta)
-        if [[ ${#merged_list[@]} -eq 0 ]]; then
-          echo "[warn] No merged_* files produced; falling back to concatenating input telo FASTAs."
-          cat "${fasta_files[@]}" > allmerged_telo.fasta
+  merged_list=()
+  if [[ ${#fasta_files[@]} -gt 1 ]]; then
+    for ((i=0; i<${#fasta_files[@]}; i++)); do
+      for ((j=i+1; j<${#fasta_files[@]}; j++)); do
+        file1="${fasta_files[i]}"
+        file2="${fasta_files[j]}"
+
+        [[ -s "$file1" ]] || continue
+        [[ -s "$file2" ]] || continue
+
+        base1=$(basename "$file1" .telo.fasta)
+        base2=$(basename "$file2" .telo.fasta)
+
+        require_cmd merge_wrapper.py
+        log_version "merge_wrapper.py" "merge_wrapper.py" 2>/dev/null || true
+
+        if merge_wrapper.py -l 1000000 "$file1" "$file2" --prefix merged_"$base1"_"$base2"; then
+          outfa="merged_${base1}_${base2}.fasta"
+          [[ -s "$outfa" ]] && merged_list+=("$outfa")
         else
-          cat "${merged_list[@]}" > allmerged_telo.fasta
+          echo "[warn] merge_wrapper.py failed for $file1 vs $file2; skipping this pair." >&2
         fi
-      fi
+      done
+    done
+  fi
 
-      require_cmd funannotate
-      funannotate sort -i allmerged_telo.fasta -b contig -o allmerged_telo_sort.fasta --minlen 500
-      check_command
+  : > allmerged_telo.fasta
 
-      require_cmd seqtk
-      seqtk telo -s 1 -m "$motif" allmerged_telo_sort.fasta > allmerged.telo.list
-      check_command
+  # Always keep original donors
+  cat "${fasta_files[@]}" >> allmerged_telo.fasta
 
-      t2t_list_inline -i allmerged.telo.list -o t2t.list -s single_tel.list -u telomere_supported.list
+  # Add successful merged products if any
+  if [[ ${#merged_list[@]} -gt 0 ]]; then
+    echo "[INFO] Adding ${#merged_list[@]} successful merged telomere FASTAs to donor pool"
+    cat "${merged_list[@]}" >> allmerged_telo.fasta
+  else
+    echo "[warn] No non-empty merged_* files produced; using original telo FASTAs only."
+  fi
 
-      # Robust inline extraction instead of extract_by_list()
-      awk '
-        BEGIN {
-          while ((getline < LIST) > 0) {
-            gsub(/\r/, "", $0)
-            if ($0 != "") ids[$1] = 1
-          }
-          close(LIST)
-        }
-        /^>/ {
-          h = substr($0, 2)
-          sub(/[ \t].*$/, "", h)
-          keep = (h in ids)
-        }
-        keep
-      ' LIST="t2t.list" allmerged_telo_sort.fasta > t2t.fasta
+  if [[ ! -s allmerged_telo.fasta ]]; then
+    echo "[error] allmerged_telo.fasta is empty after telomere-pool construction." >&2
+    exit 1
+  fi
 
-      awk '
-        BEGIN {
-          while ((getline < LIST) > 0) {
-            gsub(/\r/, "", $0)
-            if ($0 != "") ids[$1] = 1
-          }
-          close(LIST)
-        }
-        /^>/ {
-          h = substr($0, 2)
-          sub(/[ \t].*$/, "", h)
-          keep = (h in ids)
-        }
-        keep
-      ' LIST="single_tel.list" allmerged_telo_sort.fasta > single_tel.fasta
+  require_cmd funannotate
+  funannotate sort -i allmerged_telo.fasta -b contig -o allmerged_telo_sort.fasta --minlen 500
+  check_command
 
-      awk '
-        BEGIN {
-          while ((getline < LIST) > 0) {
-            gsub(/\r/, "", $0)
-            if ($0 != "") ids[$1] = 1
-          }
-          close(LIST)
-        }
-        /^>/ {
-          h = substr($0, 2)
-          sub(/[ \t].*$/, "", h)
-          keep = (h in ids)
-        }
-        keep
-      ' LIST="telomere_supported.list" allmerged_telo_sort.fasta > telomere_supported.fasta
+  if [[ ! -s allmerged_telo_sort.fasta ]]; then
+    echo "[error] allmerged_telo_sort.fasta is empty after sorting." >&2
+    exit 1
+  fi
 
-      if [[ -s single_tel.fasta ]] && command -v minimap2 >/dev/null 2>&1; then
-        echo "[INFO] Optimizing single-end telomeric pool by redundancy reduction"
-        log_version "minimap2" "minimap2" 2>/dev/null || true
+  require_cmd seqtk
+  seqtk telo -s 1 -m "$motif" allmerged_telo_sort.fasta > allmerged.telo.list
+  check_command
 
-        minimap2 -x asm20 -D -P -t "${threads:-8}" single_tel.fasta single_tel.fasta > single_tel.self.paf
-        check_command
+  t2t_list_inline -i allmerged.telo.list -o t2t.list -s single_tel.list -u telomere_supported.list
 
-        python3 - <<'PY'
-import sys
+  awk -v LIST="t2t.list" '
+    BEGIN {
+      while ((getline < LIST) > 0) {
+        gsub(/\r/, "", $0)
+        if ($0 != "") ids[$1] = 1
+      }
+      close(LIST)
+    }
+    /^>/ {
+      h = substr($0, 2)
+      sub(/[ \t].*$/, "", h)
+      keep = (h in ids)
+    }
+    keep
+  ' allmerged_telo_sort.fasta > t2t.fasta
+
+  awk -v LIST="single_tel.list" '
+    BEGIN {
+      while ((getline < LIST) > 0) {
+        gsub(/\r/, "", $0)
+        if ($0 != "") ids[$1] = 1
+      }
+      close(LIST)
+    }
+    /^>/ {
+      h = substr($0, 2)
+      sub(/[ \t].*$/, "", h)
+      keep = (h in ids)
+    }
+    keep
+  ' allmerged_telo_sort.fasta > single_tel.fasta
+
+  awk -v LIST="telomere_supported.list" '
+    BEGIN {
+      while ((getline < LIST) > 0) {
+        gsub(/\r/, "", $0)
+        if ($0 != "") ids[$1] = 1
+      }
+      close(LIST)
+    }
+    /^>/ {
+      h = substr($0, 2)
+      sub(/[ \t].*$/, "", h)
+      keep = (h in ids)
+    }
+    keep
+  ' allmerged_telo_sort.fasta > telomere_supported.fasta
+
+  if [[ -s single_tel.fasta ]] && command -v minimap2 >/dev/null 2>&1; then
+    echo "[INFO] Optimizing single-end telomeric pool by redundancy reduction"
+    log_version "minimap2" "minimap2" 2>/dev/null || true
+
+    minimap2 -x asm20 -D -P -t "${threads:-8}" single_tel.fasta single_tel.fasta > single_tel.self.paf
+    check_command
+
+    python3 - <<'PY'
 from pathlib import Path
 
 fa = Path("single_tel.fasta")
@@ -1275,15 +1291,15 @@ for ln in open(paf):
     alnlen = int(p[10])
 
     if qname == tname:
-        continue
+      continue
     if qname not in seqs or tname not in seqs or alnlen <= 0:
-        continue
+      continue
 
     ident = matches / max(1, alnlen)
     qcov = (qe - qs) / max(1, qlen)
 
     if ident >= 0.95 and qcov >= 0.85:
-        union(qname, tname)
+      union(qname, tname)
 
 clusters = {}
 for n in names:
@@ -1302,97 +1318,105 @@ with open(out_ids, "w") as o:
     for n in sorted(best):
         o.write(n + "\n")
 PY
-        check_command
+    check_command
 
-        awk '
-          BEGIN {
-            while ((getline < LIST) > 0) {
-              gsub(/\r/, "", $0)
-              if ($0 != "") ids[$1] = 1
-            }
-            close(LIST)
-          }
-          /^>/ {
-            h = substr($0, 2)
-            sub(/[ \t].*$/, "", h)
-            keep = (h in ids)
-          }
-          keep
-        ' LIST="single_tel_best.ids" single_tel.fasta > single_tel_best.fasta
-      else
-        cp -f single_tel.fasta single_tel_best.fasta 2>/dev/null || : > single_tel_best.fasta
-      fi
+    awk -v LIST="single_tel_best.ids" '
+      BEGIN {
+        while ((getline < LIST) > 0) {
+          gsub(/\r/, "", $0)
+          if ($0 != "") ids[$1] = 1
+        }
+        close(LIST)
+      }
+      /^>/ {
+        h = substr($0, 2)
+        sub(/[ \t].*$/, "", h)
+        keep = (h in ids)
+      }
+      keep
+    ' single_tel.fasta > single_tel_best.fasta
+  else
+    cp -f single_tel.fasta single_tel_best.fasta 2>/dev/null || : > single_tel_best.fasta
+  fi
 
-      : > telomere_supported_best.fasta
-      if [[ -s t2t.fasta ]]; then
-        cat t2t.fasta >> telomere_supported_best.fasta
-      fi
-      if [[ -s single_tel_best.fasta ]]; then
-        cat single_tel_best.fasta >> telomere_supported_best.fasta
-      fi
-      if [[ ! -s telomere_supported_best.fasta && -s telomere_supported.fasta ]]; then
-        cp -f telomere_supported.fasta telomere_supported_best.fasta
-      fi
+  : > telomere_supported_best.fasta
+  if [[ -s t2t.fasta ]]; then
+    cat t2t.fasta >> telomere_supported_best.fasta
+  fi
+  if [[ -s single_tel_best.fasta ]]; then
+    cat single_tel_best.fasta >> telomere_supported_best.fasta
+  fi
+  if [[ ! -s telomere_supported_best.fasta && -s telomere_supported.fasta ]]; then
+    cp -f telomere_supported.fasta telomere_supported_best.fasta
+  fi
 
-      require_cmd funannotate
+  require_cmd funannotate
 
-      if [[ -s t2t.fasta ]]; then
-        funannotate clean -i t2t.fasta -p 30 -o t2t_clean.fasta --exhaustive
-        check_command
-      else
-        : > t2t_clean.fasta
-      fi
+  if [[ -s t2t.fasta ]]; then
+    funannotate clean -i t2t.fasta -p 30 -o t2t_clean.fasta --exhaustive
+    check_command
+  else
+    : > t2t_clean.fasta
+  fi
 
-      if [[ -s single_tel_best.fasta ]]; then
-        funannotate clean -i single_tel_best.fasta -p 30 -o single_tel_best_clean.fasta --exhaustive
-        check_command
-      else
-        : > single_tel_best_clean.fasta
-      fi
+  if [[ -s single_tel_best.fasta ]]; then
+    funannotate clean -i single_tel_best.fasta -p 30 -o single_tel_best_clean.fasta --exhaustive
+    check_command
+  else
+    : > single_tel_best_clean.fasta
+  fi
 
-      if [[ -s telomere_supported_best.fasta ]]; then
-        funannotate clean -i telomere_supported_best.fasta -p 30 -o telomere_supported_best_clean.fasta --exhaustive
-        check_command
-      else
-        : > telomere_supported_best_clean.fasta
-      fi
+  if [[ -s telomere_supported_best.fasta ]]; then
+    funannotate clean -i telomere_supported_best.fasta -p 30 -o telomere_supported_best_clean.fasta --exhaustive
+    check_command
+  else
+    : > telomere_supported_best_clean.fasta
+  fi
 
-      cp -f single_tel_best.fasta single_tel.fasta 2>/dev/null || true
-      cp -f single_tel_best_clean.fasta single_tel_clean.fasta 2>/dev/null || true
-      cp -f telomere_supported_best.fasta telomere_supported.fasta 2>/dev/null || true
-      cp -f telomere_supported_best_clean.fasta telomere_supported_clean.fasta 2>/dev/null || true
+  cp -f single_tel_best.fasta single_tel.fasta 2>/dev/null || true
+  cp -f single_tel_best_clean.fasta single_tel_clean.fasta 2>/dev/null || true
+  cp -f telomere_supported_best.fasta telomere_supported.fasta 2>/dev/null || true
+  cp -f telomere_supported_best_clean.fasta telomere_supported_clean.fasta 2>/dev/null || true
 
-      strict_t2t_n=$(grep -c '^>' t2t.fasta 2>/dev/null || true)
-      single_tel_n=$(grep -c '^>' single_tel_best.fasta 2>/dev/null || true)
-      tel_supported_n=$(grep -c '^>' telomere_supported_best.fasta 2>/dev/null || true)
+  strict_t2t_n=$(grep -c '^>' t2t.fasta 2>/dev/null || echo 0)
+  single_tel_n=$(grep -c '^>' single_tel_best.fasta 2>/dev/null || echo 0)
+  tel_supported_n=$(grep -c '^>' telomere_supported_best.fasta 2>/dev/null || echo 0)
 
-      {
-        echo "strict_t2t_contigs,${strict_t2t_n:-0}"
-        echo "single_telomere_best_contigs,${single_tel_n:-0}"
-        echo "telomere_supported_best_contigs,${tel_supported_n:-0}"
-      } > telomere_support_summary.csv
+  {
+    echo "strict_t2t_contigs,${strict_t2t_n:-0}"
+    echo "single_telomere_best_contigs,${single_tel_n:-0}"
+    echo "telomere_supported_best_contigs,${tel_supported_n:-0}"
+  } > telomere_support_summary.csv
 
-      echo "[INFO] Telomere support summary:"
-      cat telomere_support_summary.csv
+  echo "[INFO] Telomere support summary:"
+  cat telomere_support_summary.csv
 
-      if [[ -s t2t_clean.fasta ]]; then
-        cp -f t2t_clean.fasta protected_telomere_contigs.fasta
-        echo "strict_t2t" > protected_telomere_mode.txt
-        echo "[INFO] Protected contigs mode: strict_t2t"
-      elif [[ -s single_tel_best_clean.fasta ]]; then
-        cp -f single_tel_best_clean.fasta protected_telomere_contigs.fasta
-        echo "single_tel_best" > protected_telomere_mode.txt
-        echo "[INFO] Protected contigs mode: single_tel_best"
-      elif [[ -s telomere_supported_best_clean.fasta ]]; then
-        cp -f telomere_supported_best_clean.fasta protected_telomere_contigs.fasta
-        echo "telomere_supported_best" > protected_telomere_mode.txt
-        echo "[INFO] Protected contigs mode: telomere_supported_best"
-      else
-        : > protected_telomere_contigs.fasta
-        echo "none" > protected_telomere_mode.txt
-        echo "[WARN] No telomere-supported contigs found"
-      fi
-      ;;
+  if [[ -s t2t_clean.fasta ]]; then
+    cp -f t2t_clean.fasta assemblies/protected_telomere_contigs.fasta
+    echo "strict_t2t" > assemblies/protected_telomere_mode.txt
+    echo "[INFO] Protected contigs mode: strict_t2t"
+  elif [[ -s single_tel_best.fasta ]]; then
+    cp -f single_tel_best.fasta assemblies/protected_telomere_contigs.fasta
+    echo "single_tel_best_raw" > assemblies/protected_telomere_mode.txt
+    echo "[INFO] Protected contigs mode: single_tel_best_raw"
+  elif [[ -s single_tel_best_clean.fasta ]]; then
+    cp -f single_tel_best_clean.fasta assemblies/protected_telomere_contigs.fasta
+    echo "single_tel_best" > assemblies/protected_telomere_mode.txt
+    echo "[INFO] Protected contigs mode: single_tel_best"
+  elif [[ -s telomere_supported_best.fasta ]]; then
+    cp -f telomere_supported_best.fasta assemblies/protected_telomere_contigs.fasta
+    echo "telomere_supported_best_raw" > assemblies/protected_telomere_mode.txt
+    echo "[INFO] Protected contigs mode: telomere_supported_best_raw"
+  elif [[ -s telomere_supported_best_clean.fasta ]]; then
+    cp -f telomere_supported_best_clean.fasta assemblies/protected_telomere_contigs.fasta
+    echo "telomere_supported_best" > assemblies/protected_telomere_mode.txt
+    echo "[INFO] Protected contigs mode: telomere_supported_best"
+  else
+    : > assemblies/protected_telomere_contigs.fasta
+    echo "none" > assemblies/protected_telomere_mode.txt
+    echo "[WARN] No telomere-supported contigs found"
+  fi
+  ;;
 
     11)
       echo "Step 11 - QUAST metrics for all assemblies"
@@ -1513,66 +1537,121 @@ print(f"Wrote {OUT}")
 PY
       echo "[ok] Wrote assemblies/assembly.quast.csv"
       ;;
-    12)
-      echo "Step 12 - Final assembly refinement with optimized telomere-end replacement"
+12)
+  echo "Step 12 - Final assembly refinement with optimized telomere-end replacement"
 
-      assembler="${assembler:-}"
-      CHOOSE_FLAG="${CHOOSE_FLAG:-0}"
-      AUTO_MODE="${auto_mode:-smart}"
-      MERQURY_ENABLE=0
-      [[ "${merqury_enable:-false}" == true ]] && MERQURY_ENABLE=1
-      MERQURY_DB="${merqury_db:-}"
+  PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 
-      echo "[info] Auto-selection mode: $AUTO_MODE"
-      echo "[info] Merqury enabled: $MERQURY_ENABLE"
+  cleanup_final_analysis_outputs() {
+    local ROOT="${PROJECT_ROOT:-$(pwd)}"
 
-      mkdir -p merqury assemblies
+    echo "[INFO] Removing stale final-analysis outputs before rebuilding final assembly"
+    echo "[INFO] Project root: $ROOT"
 
-      # ------------------------------------------------------------
-      # 12A. Optional Merqury pre-selection
-      # ------------------------------------------------------------
-      if [[ "$MERQURY_ENABLE" -eq 1 ]]; then
-        if [[ -z "$MERQURY_DB" ]]; then
-          for cand in reads.meryl meryl/reads.meryl merqury/reads.meryl *.meryl; do
-            [[ -e "$cand" ]] || continue
-            if [[ -d "$cand" ]]; then
-              MERQURY_DB="$cand"
-              break
-            fi
-          done
+    rm -rf \
+      "$ROOT/busco/final" \
+      "$ROOT/busco/run_final" \
+      "$ROOT/quast_final"
+
+    rm -f \
+      "$ROOT/assemblies/final.merged.fasta" \
+      "$ROOT/assemblies/final_merge.raw.fasta" \
+      "$ROOT/assemblies/final.telo.list" \
+      "$ROOT/assemblies/final.telo.list.ids" \
+      "$ROOT/assemblies/final.telo.fasta" \
+      "$ROOT/assemblies/merged.telo.csv" \
+      "$ROOT/assemblies/merged.busco.csv" \
+      "$ROOT/assemblies/merged.quast.csv" \
+      "$ROOT/assemblies/merged-quast.tsv" \
+      "$ROOT/assemblies/merged.merqury.csv" \
+      "$ROOT/assemblies/selection_decision.txt" \
+      "$ROOT/assemblies/selection_debug.tsv" \
+      "$ROOT/assemblies/backbone.clean.fa" \
+      "$ROOT/assemblies/backbone.filtered.fa" \
+      "$ROOT/assemblies/backbone.filtered.nodup.fa" \
+      "$ROOT/assemblies/backbone.keep.ids" \
+      "$ROOT/assemblies/backbone.telomere_rescued.fa" \
+      "$ROOT/assemblies/backbone.telomere_rescued.next.fa" \
+      "$ROOT/assemblies/backbone.telomere_rescued.dedup.fa" \
+      "$ROOT/assemblies/backbone.telomere_rescued.keep.ids" \
+      "$ROOT/assemblies/backbone_vs_protected.paf" \
+      "$ROOT/assemblies/single_tel_vs_backbone.paf" \
+      "$ROOT/assemblies/single_tel.replaced.ids" \
+      "$ROOT/assemblies/single_tel.replaced.debug.tsv" \
+      "$ROOT/assemblies/rescue_rejection_summary.txt" \
+      "$ROOT/assemblies/rescued_vs_protected.paf" \
+      "$ROOT/final_results/final_result.csv"
+
+    rm -f \
+      "$ROOT/merqury/final.qv" \
+      "$ROOT/merqury/final.completeness.stats" \
+      "$ROOT/merqury/final.hist" \
+      "$ROOT/merqury/final.spectra-asm.hist" \
+      "$ROOT/merqury/final.spectra-cn.hist" \
+      "$ROOT/merqury/final.dist_only.hist" \
+      "$ROOT/merqury/final.trio.log" \
+      "$ROOT"/merqury/final*.png \
+      "$ROOT"/merqury/final*.pdf \
+      "$ROOT"/merqury/final*.txt
+
+    echo "[ok] Previous final outputs removed"
+  }
+
+  cleanup_final_analysis_outputs
+
+  assembler="${assembler:-}"
+  CHOOSE_FLAG="${CHOOSE_FLAG:-0}"
+  AUTO_MODE="${auto_mode:-smart}"
+  MERQURY_ENABLE=0
+  [[ "${merqury_enable:-false}" == true ]] && MERQURY_ENABLE=1
+  MERQURY_DB="${merqury_db:-}"
+
+  echo "[info] Auto-selection mode: $AUTO_MODE"
+  echo "[info] Merqury enabled: $MERQURY_ENABLE"
+
+  mkdir -p merqury assemblies final_results
+
+  if [[ "$MERQURY_ENABLE" -eq 1 ]]; then
+    if [[ -z "$MERQURY_DB" ]]; then
+      for cand in reads.meryl meryl/reads.meryl merqury/reads.meryl *.meryl; do
+        [[ -e "$cand" ]] || continue
+        if [[ -d "$cand" ]]; then
+          MERQURY_DB="$cand"
+          break
         fi
+      done
+    fi
 
-        if command -v merqury.sh >/dev/null 2>&1 && [[ -n "$MERQURY_DB" && -d "$MERQURY_DB" ]]; then
-          echo "[INFO] Running Merqury pre-selection using database: $MERQURY_DB"
-          log_version "merqury.sh" "merqury.sh" 2>/dev/null || true
+    if command -v merqury.sh >/dev/null 2>&1 && [[ -n "$MERQURY_DB" && -d "$MERQURY_DB" ]]; then
+      echo "[INFO] Running Merqury pre-selection using database: $MERQURY_DB"
+      log_version "merqury.sh" "merqury.sh" 2>/dev/null || true
 
-          declare -A asm_paths=(
-            [canu]="assemblies/canu.result.fasta"
-            [external]="assemblies/external.result.fasta"
-            [flye]="assemblies/flye.result.fasta"
-            [ipa]="assemblies/ipa.result.fasta"
-            [nextDenovo]="assemblies/nextDenovo.result.fasta"
-            [peregrine]="assemblies/peregrine.result.fasta"
-            [hifiasm]="assemblies/hifiasm.result.fasta"
-          )
+      declare -A asm_paths=(
+        [canu]="assemblies/canu.result.fasta"
+        [external]="assemblies/external.result.fasta"
+        [flye]="assemblies/flye.result.fasta"
+        [ipa]="assemblies/ipa.result.fasta"
+        [nextDenovo]="assemblies/nextDenovo.result.fasta"
+        [peregrine]="assemblies/peregrine.result.fasta"
+        [hifiasm]="assemblies/hifiasm.result.fasta"
+      )
 
-          for asm_name in canu external flye ipa nextDenovo peregrine hifiasm; do
-            asm_fa_i="${asm_paths[$asm_name]}"
-            [[ -s "$asm_fa_i" ]] || continue
-            if [[ ! -f "merqury/${asm_name}.qv" || ! -f "merqury/${asm_name}.completeness.stats" ]]; then
-              merqury.sh "$MERQURY_DB" "$asm_fa_i" "merqury/${asm_name}" || \
-                echo "[warn] Merqury failed for ${asm_name}" >&2
-            fi
-          done
-        else
-          echo "[warn] Merqury requested but merqury.sh or a valid .meryl database was not found; skipping Merqury." >&2
+      for asm_name in canu external flye ipa nextDenovo peregrine hifiasm; do
+        asm_fa_i="${asm_paths[$asm_name]}"
+        [[ -s "$asm_fa_i" ]] || continue
+        if [[ ! -f "merqury/${asm_name}.qv" || ! -f "merqury/${asm_name}.completeness.stats" ]]; then
+          merqury.sh "$MERQURY_DB" "$asm_fa_i" "merqury/${asm_name}" || \
+            echo "[warn] Merqury failed for ${asm_name}" >&2
         fi
-      else
-        echo "[INFO] Merqury disabled for this run"
-      fi
+      done
+    else
+      echo "[warn] Merqury requested but merqury.sh or a valid .meryl database was not found; skipping Merqury." >&2
+    fi
+  else
+    echo "[INFO] Merqury disabled for this run"
+  fi
 
-      # Always write Merqury summary CSV
-      python3 - <<'PY'
+  python3 - <<'PY'
 import os, csv, re
 
 assemblers = ["canu","external","flye","ipa","nextDenovo","peregrine","hifiasm"]
@@ -1608,20 +1687,17 @@ with open("assemblies/assembly.merqury.csv", "w", newline="") as f:
 
 print("Wrote assemblies/assembly.merqury.csv")
 PY
-      check_command
+  check_command
 
-      build_assembly_info_v2
+  build_assembly_info_v2
 
-      # ------------------------------------------------------------
-      # 12B. Auto-select backbone assembler
-      # ------------------------------------------------------------
-      if [[ $CHOOSE_FLAG -eq 0 && -z "$assembler" ]]; then
-        if [[ ! -s assemblies/assembly_info.csv ]]; then
-          echo "[warn] assemblies/assembly_info.csv missing or empty; cannot auto-select assembler." >&2
-        else
-          echo "[info] Selection criteria: BUSCO + telomere + Merqury + contiguity + N50"
+  if [[ $CHOOSE_FLAG -eq 0 && -z "$assembler" ]]; then
+    if [[ ! -s assemblies/assembly_info.csv ]]; then
+      echo "[warn] assemblies/assembly_info.csv missing or empty; cannot auto-select assembler." >&2
+    else
+      echo "[info] Selection criteria: BUSCO-first backbone selection with contiguity penalty and modest telomere weighting"
 
-          assembler="$(
+      assembler="$(
 AUTO_MODE_ENV="$AUTO_MODE" python3 - <<'PY'
 import csv, math, os, sys
 from pathlib import Path
@@ -1706,12 +1782,12 @@ for idx, asm in enumerate(header[1:], start=1):
             continue
         score = (
             busco * 1000
-            + t2t * 600
-            + single * 250
+            + t2t * 500
+            + single * 50
             + merqury_comp * 200
             + merqury_qv * 20
-            - contigs * 10
-            + math.log10(n50) * 100
+            - contigs * 30
+            + math.log10(n50) * 120
         )
 
     records.append({
@@ -1753,73 +1829,67 @@ with decision_txt.open("w") as f:
     f.write(f"auto_mode\t{mode}\n")
     f.write(f"selected_assembler\t{best_name or ''}\n")
     f.write(f"selected_score\t{best_score if best_score is not None else ''}\n")
-    f.write("score_formula\tBUSCO*1000 + T2T*600 + single*250 + MerquryComp*200 + MerquryQV*20 - contigs*10 + log10(N50)*100\n")
+    f.write("score_formula\tBUSCO*1000 + T2T*500 + single*50 + MerquryComp*200 + MerquryQV*20 - contigs*30 + log10(N50)*120\n")
 
 if best_name:
     print(best_name)
 PY
-          )"
+      )"
 
-          if [[ -n "$assembler" ]]; then
-            echo "[info] Auto-selected assembler: $assembler"
-          else
-            echo "[warn] Auto-selection failed; fallback required." >&2
-          fi
-        fi
+      if [[ -n "$assembler" ]]; then
+        echo "[info] Auto-selected assembler: $assembler"
+      else
+        echo "[warn] Auto-selection failed; fallback required." >&2
       fi
+    fi
+  fi
 
-      valid_assemblers="canu external flye ipa nextDenovo peregrine hifiasm"
-      if [[ -z "${assembler:-}" ]]; then
-        if ! prompt_from_tty assembler "Enter the assembler to use for the final refinement (e.g., ${valid_assemblers// /, }): "; then
-          echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
-          exit 2
-        fi
-      fi
+  valid_assemblers="canu external flye ipa nextDenovo peregrine hifiasm"
+  if [[ -z "${assembler:-}" ]]; then
+    if ! prompt_from_tty assembler "Enter the assembler to use for the final refinement (e.g., ${valid_assemblers// /, }): "; then
+      echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
+      exit 2
+    fi
+  fi
 
-      while :; do
-        assembler="$(printf "%s" "$assembler" | awk '{$1=$1};1')"
-        if printf ' %s ' "$valid_assemblers" | grep -q " $assembler "; then
-          break
-        fi
-        echo "[warn] '$assembler' is not a valid assembler." >&2
-        if ! prompt_from_tty assembler "Enter one of [${valid_assemblers// /, }]: "; then
-          echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
-          exit 2
-        fi
-      done
+  while :; do
+    assembler="$(printf "%s" "$assembler" | awk '{$1=$1};1')"
+    if printf ' %s ' "$valid_assemblers" | grep -q " $assembler "; then
+      break
+    fi
+    echo "[warn] '$assembler' is not a valid assembler." >&2
+    if ! prompt_from_tty assembler "Enter one of [${valid_assemblers// /, }]: "; then
+      echo "[error] No interactive TTY available; re-run with --choose=<assembler>." >&2
+      exit 2
+    fi
+  done
 
-      asm_fa="assemblies/${assembler}.result.fasta"
-      if [[ ! -s "$asm_fa" ]]; then
-        echo "[error] Selected assembler '$assembler' does not have '$asm_fa'." >&2
-        exit 1
-      fi
+  asm_fa="assemblies/${assembler}.result.fasta"
+  if [[ ! -s "$asm_fa" ]]; then
+    echo "[error] Selected assembler '$assembler' does not have '$asm_fa'." >&2
+    exit 1
+  fi
 
-      protected_fasta=""
-      protected_mode="none"
+  protected_fasta=""
+  protected_mode="none"
+  if [[ -s assemblies/protected_telomere_contigs.fasta ]]; then
+    protected_fasta="assemblies/protected_telomere_contigs.fasta"
+    if [[ -s assemblies/protected_telomere_mode.txt ]]; then
+      protected_mode="$(cat assemblies/protected_telomere_mode.txt)"
+    fi
+  fi
 
-      if [[ -s protected_telomere_contigs.fasta ]]; then
-        protected_fasta="protected_telomere_contigs.fasta"
-        if [[ -s protected_telomere_mode.txt ]]; then
-          protected_mode="$(cat protected_telomere_mode.txt)"
-        else
-          protected_mode="telomere_supported"
-        fi
-      fi
+  echo "[INFO] Protected mode for final refinement: $protected_mode"
+  echo "[INFO] Selected backbone assembly: $asm_fa"
 
-      echo "[INFO] Protected mode for final refinement: $protected_mode"
-      echo "[INFO] Selected backbone assembly: $asm_fa"
-
-      # ------------------------------------------------------------
-      # 12C. Prepare cleaned backbone
-      # ------------------------------------------------------------
-      python3 - "$asm_fa" <<'PY'
+  python3 - "$asm_fa" <<'PY'
 import sys
 from pathlib import Path
 
 inp = Path(sys.argv[1])
 out = Path("assemblies/backbone.clean.fa")
-
 seen = {}
+
 with inp.open() as f, out.open("w") as o:
     name = None
     seq = []
@@ -1851,27 +1921,25 @@ with inp.open() as f, out.open("w") as o:
             seq.append(ln.strip())
     flush()
 PY
-      check_command
+  check_command
 
-      backbone_fa="assemblies/backbone.clean.fa"
+  cp -f assemblies/backbone.clean.fa assemblies/backbone.filtered.nodup.fa
 
-      # ------------------------------------------------------------
-      # 12D. Remove backbone contigs redundant to protected telomere pool
-      # ------------------------------------------------------------
-      if [[ -n "$protected_fasta" && -s "$protected_fasta" ]]; then
-        echo "[INFO] Using protected telomere contigs from $protected_fasta"
-        cp -f "$protected_fasta" assemblies/protected.telomere.fa
+  if [[ -n "$protected_fasta" && -s "$protected_fasta" ]]; then
+    cp -f "$protected_fasta" assemblies/protected.telomere.fa
 
-        if command -v minimap2 >/dev/null 2>&1; then
-          log_version "minimap2" "minimap2" 2>/dev/null || true
-          paf="assemblies/backbone_vs_protected.paf"
-          minimap2 -x asm20 -t "${threads:-8}" assemblies/protected.telomere.fa "$backbone_fa" > "$paf"
-          check_command
+    if [[ "$protected_mode" == "strict_t2t" || "$protected_mode" == "telomere_supported_best" || "$protected_mode" == "telomere_supported_best_raw" ]]; then
+      echo "[INFO] Full-length-like protected mode: allowing cautious backbone redundancy filtering"
 
-          python3 - "$paf" "$backbone_fa" > assemblies/backbone.keep.ids <<'PY'
+      if command -v minimap2 >/dev/null 2>&1; then
+        paf="assemblies/backbone_vs_protected.paf"
+        minimap2 -x asm20 -t "${threads:-8}" assemblies/protected.telomere.fa assemblies/backbone.clean.fa > "$paf"
+        check_command
+
+        python3 - "$paf" assemblies/backbone.clean.fa > assemblies/backbone.keep.ids <<'PY'
 import os, sys
 
-cov_thr = float(os.getenv("PROTECT_COV", "0.95"))
+cov_q_thr = float(os.getenv("PROTECT_BACKBONE_COV", "0.95"))
 id_thr = float(os.getenv("PROTECT_ID", "0.95"))
 
 best = {}
@@ -1882,25 +1950,21 @@ with open(sys.argv[1]) as f:
         p = ln.rstrip().split("\t")
         if len(p) < 12:
             continue
-
         qname = p[0]
-        qlen = int(p[1])
-        qs = int(p[2])
-        qe = int(p[3])
+        qlen  = int(p[1])
+        qs    = int(p[2])
+        qe    = int(p[3])
         matches = int(p[9])
-        alnlen = int(p[10])
-
+        alnlen  = int(p[10])
         if qlen <= 0 or alnlen <= 0:
             continue
-
+        cov_q = (qe - qs) / max(1, qlen)
         ident = matches / max(1, alnlen)
-        cov = (qe - qs) / max(1, qlen)
-
         cur = best.get(qname, (0.0, 0.0))
-        if cov > cur[0] or (abs(cov - cur[0]) < 1e-12 and ident > cur[1]):
-            best[qname] = (cov, ident)
+        if cov_q > cur[0] or (abs(cov_q - cur[0]) < 1e-12 and ident > cur[1]):
+            best[qname] = (cov_q, ident)
 
-drop = {q for q, (cov, ident) in best.items() if cov >= cov_thr and ident >= id_thr}
+drop = {q for q, (cov_q, ident) in best.items() if cov_q >= cov_q_thr and ident >= id_thr}
 
 keep = []
 with open(sys.argv[2]) as f:
@@ -1915,27 +1979,20 @@ with open(sys.argv[2]) as f:
 
 print("\n".join(keep))
 PY
-          check_command
+        check_command
 
-          python3 - assemblies/backbone.keep.ids "$backbone_fa" assemblies/backbone.filtered.fa <<'PY'
+        python3 - assemblies/backbone.keep.ids assemblies/backbone.clean.fa assemblies/backbone.filtered.nodup.fa <<'PY'
 import sys
-
-ids_file, inp, outp = sys.argv[1:4]
-
-with open(ids_file) as f:
-    ids = {ln.strip() for ln in f if ln.strip()}
-
-with open(inp) as f, open(outp, "w") as o:
+ids = {ln.strip() for ln in open(sys.argv[1]) if ln.strip()}
+with open(sys.argv[2]) as f, open(sys.argv[3], "w") as o:
     name = None
     seq = []
-
     def flush():
         if name is not None and name in ids:
             o.write(f">{name}\n")
             s = "".join(seq)
             for i in range(0, len(s), 60):
                 o.write(s[i:i+60] + "\n")
-
     for ln in f:
         if ln.startswith(">"):
             flush()
@@ -1945,58 +2002,41 @@ with open(inp) as f, open(outp, "w") as o:
             seq.append(ln.strip())
     flush()
 PY
-          check_command
-        else
-          echo "[warn] minimap2 not found; cannot filter redundant backbone contigs. Keeping all selected-assembly contigs." >&2
-          cp -f "$backbone_fa" assemblies/backbone.filtered.fa
-        fi
-
-        awk '
-        BEGIN {
-          while ((getline < PFA) > 0) {
-            if ($0 ~ /^>/) {
-              h=substr($0,2)
-              split(h,a,/[\t ]/)
-              protected[a[1]]=1
-            }
-          }
-        }
-        /^>/ {
-          h=substr($0,2)
-          split(h,a,/[\t ]/)
-          keep=!(a[1] in protected)
-        }
-        keep
-        ' PFA="assemblies/protected.telomere.fa" assemblies/backbone.filtered.fa > assemblies/backbone.filtered.nodup.fa
-      else
-        echo "[WARN] No protected telomere contigs found; keeping backbone for telomere rescue only"
-        : > assemblies/protected.telomere.fa
-        cp -f "$backbone_fa" assemblies/backbone.filtered.nodup.fa
+        check_command
       fi
+    else
+      echo "[INFO] Single-end protected mode: backbone-dropping disabled; rescue-only behavior"
+    fi
+  else
+    : > assemblies/protected.telomere.fa
+  fi
 
-      # ------------------------------------------------------------
-      # 12E. Telomere rescue using optimized best single-end pool
-      # ------------------------------------------------------------
-      single_tel_src=""
-      if [[ -s single_tel_best_clean.fasta ]]; then
-        single_tel_src="single_tel_best_clean.fasta"
-      elif [[ -s single_tel_clean.fasta ]]; then
-        single_tel_src="single_tel_clean.fasta"
-      elif [[ -s single_tel.fasta ]]; then
-        single_tel_src="single_tel.fasta"
-      fi
+  single_tel_src=""
+  if [[ -s single_tel_best.fasta ]]; then
+    single_tel_src="single_tel_best.fasta"
+  elif [[ -s single_tel_best_clean.fasta ]]; then
+    single_tel_src="single_tel_best_clean.fasta"
+  elif [[ -s single_tel_clean.fasta ]]; then
+    single_tel_src="single_tel_clean.fasta"
+  elif [[ -s single_tel.fasta ]]; then
+    single_tel_src="single_tel.fasta"
+  fi
 
-      if [[ -n "$single_tel_src" ]]; then
-        echo "[INFO] Running telomere rescue using $single_tel_src"
-        cp -f assemblies/backbone.filtered.nodup.fa assemblies/backbone.telomere_rescued.fa
+  cp -f assemblies/backbone.filtered.nodup.fa assemblies/backbone.telomere_rescued.fa
 
-        if command -v minimap2 >/dev/null 2>&1; then
-          rescue_paf="assemblies/single_tel_vs_backbone.paf"
-          minimap2 -x asm20 -t "${threads:-8}" assemblies/backbone.telomere_rescued.fa "$single_tel_src" > "$rescue_paf"
-          check_command
+  echo "[INFO] Protected donor contigs: $(grep -c '^>' assemblies/protected.telomere.fa 2>/dev/null || echo 0)"
+  echo "[INFO] Single-end donor contigs: $(grep -c '^>' "$single_tel_src" 2>/dev/null || echo 0)"
+  echo "[INFO] Backbone contigs before rescue: $(grep -c '^>' assemblies/backbone.telomere_rescued.fa 2>/dev/null || echo 0)"
 
-          python3 - "$single_tel_src" assemblies/backbone.telomere_rescued.fa "$rescue_paf" assemblies/single_tel.replaced.ids assemblies/backbone.telomere_rescued.next.fa <<'PY'
+  if [[ -n "$single_tel_src" ]] && command -v minimap2 >/dev/null 2>&1; then
+    rescue_paf="assemblies/single_tel_vs_backbone.paf"
+    minimap2 -x asm20 -t "${threads:-8}" "$single_tel_src" assemblies/backbone.telomere_rescued.fa > "$rescue_paf"
+    check_command
+
+    python3 - "$single_tel_src" assemblies/backbone.telomere_rescued.fa "$rescue_paf" \
+      assemblies/single_tel.replaced.ids assemblies/backbone.telomere_rescued.next.fa <<'PY'
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 single_fa = Path(sys.argv[1])
@@ -2006,8 +2046,9 @@ out_ids = Path(sys.argv[4])
 out_fa = Path(sys.argv[5])
 
 min_ident = 0.90
-min_cov = 0.80
-min_ext = 500
+min_aln_bp = 15000
+min_ext = 1500
+terminal_window = 300
 
 def read_fa(path):
     seqs = {}
@@ -2029,7 +2070,18 @@ def read_fa(path):
 single = read_fa(single_fa)
 backbone = read_fa(backbone_fa)
 
-best = {}
+by_donor = defaultdict(list)
+
+seen = 0
+fail_not_in = 0
+fail_zero = 0
+fail_not_terminal = 0
+fail_ident = 0
+fail_aln_bp = 0
+fail_ext = 0
+pass_count = 0
+debug_rows = []
+
 for ln in open(paf):
     if not ln.strip() or ln.startswith("#"):
         continue
@@ -2037,83 +2089,155 @@ for ln in open(paf):
     if len(p) < 12:
         continue
 
-    qname = p[0]
+    backbone_name = p[0]
     qlen = int(p[1])
     qs = int(p[2])
     qe = int(p[3])
-    tname = p[5]
+
+    donor_name = p[5]
+    tlen = int(p[6])
+    ts = int(p[7])
+    te = int(p[8])
+
     matches = int(p[9])
     alnlen = int(p[10])
 
-    if qname not in single or tname not in backbone:
+    seen += 1
+
+    if backbone_name not in backbone or donor_name not in single:
+        fail_not_in += 1
         continue
-    if alnlen <= 0 or qlen <= 0:
+
+    if alnlen <= 0 or qlen <= 0 or tlen <= 0:
+        fail_zero += 1
         continue
 
     ident = matches / max(1, alnlen)
-    cov_q = (qe - qs) / max(1, qlen)
-    left_overhang = qs
-    right_overhang = qlen - qe
-    ext = max(left_overhang, right_overhang)
+    aligned_bp = qe - qs
 
-    if ident < min_ident or cov_q < min_cov or ext < min_ext:
+    donor_left_overhang = ts
+    donor_right_overhang = tlen - te
+    ext = max(donor_left_overhang, donor_right_overhang)
+
+    touches_left = (qs <= terminal_window)
+    touches_right = ((qlen - qe) <= terminal_window)
+    terminal_ok = touches_left or touches_right
+
+    debug_rows.append((
+        donor_name, backbone_name, ident, aligned_bp, ext,
+        int(touches_left), int(touches_right)
+    ))
+
+    if not terminal_ok:
+        fail_not_terminal += 1
+        continue
+    if ident < min_ident:
+        fail_ident += 1
+        continue
+    if aligned_bp < min_aln_bp:
+        fail_aln_bp += 1
+        continue
+    if ext < min_ext:
+        fail_ext += 1
         continue
 
-    cur = best.get(tname)
-    score = (ext, ident, cov_q, len(single[qname]), qname)
-    if cur is None or score > cur[0]:
-        best[tname] = (score, qname)
+    pass_count += 1
+    score = (ext, ident, aligned_bp, len(single[donor_name]), donor_name, backbone_name)
+    by_donor[donor_name].append((score, backbone_name))
 
-replaced = set()
+accepted_pairs = []
+replaced_backbone = set()
+used_donors = set()
+
+# each donor can replace at most one backbone contig
+for donor, hits in by_donor.items():
+    hits = sorted(hits, key=lambda x: x[0], reverse=True)
+    for score, backbone_name in hits:
+        if backbone_name in replaced_backbone:
+            continue
+        accepted_pairs.append((backbone_name, donor))
+        replaced_backbone.add(backbone_name)
+        used_donors.add(donor)
+        break
+
+# hard safety cap to prevent catastrophic collapse
+max_replacements = min(3, max(1, len(single)))
+if len(accepted_pairs) > max_replacements:
+    accepted_pairs = accepted_pairs[:max_replacements]
+    replaced_backbone = {b for b, d in accepted_pairs}
+    used_donors = {d for b, d in accepted_pairs}
+
 with out_ids.open("w") as ids:
-    for tname, (_, qname) in sorted(best.items()):
-        replaced.add(tname)
-        ids.write(f"{tname}\t{qname}\n")
-
-used_single = set(qname for _, qname in best.values())
+    for backbone_name, donor in sorted(accepted_pairs):
+        ids.write(f"{backbone_name}\t{donor}\n")
 
 with out_fa.open("w") as out:
-    for qname in sorted(used_single):
-        seq = single[qname]
-        out.write(f">{qname}\n")
+    for donor in sorted(used_donors):
+        seq = single[donor]
+        out.write(f">{donor}\n")
         for i in range(0, len(seq), 60):
             out.write(seq[i:i+60] + "\n")
 
-    for tname, seq in backbone.items():
-        if tname in replaced:
+    for backbone_name, seq in backbone.items():
+        if backbone_name in replaced_backbone:
             continue
-        out.write(f">{tname}\n")
+        out.write(f">{backbone_name}\n")
         for i in range(0, len(seq), 60):
             out.write(seq[i:i+60] + "\n")
+
+with open("assemblies/single_tel.replaced.debug.tsv", "w") as o:
+    o.write("donor\tbackbone\tident\taligned_bp\text\ttouches_left\ttouches_right\n")
+    for r in debug_rows:
+        o.write(f"{r[0]}\t{r[1]}\t{r[2]:.4f}\t{r[3]}\t{r[4]}\t{r[5]}\t{r[6]}\n")
+
+with open("assemblies/rescue_rejection_summary.txt", "w") as o:
+    o.write(f"seen={seen}\n")
+    o.write(f"pass_count={pass_count}\n")
+    o.write(f"accepted_replacements={len(accepted_pairs)}\n")
+    o.write(f"accepted_donors={len(used_donors)}\n")
+    o.write(f"fail_not_in={fail_not_in}\n")
+    o.write(f"fail_zero={fail_zero}\n")
+    o.write(f"fail_not_terminal={fail_not_terminal}\n")
+    o.write(f"fail_ident={fail_ident}\n")
+    o.write(f"fail_aln_bp={fail_aln_bp}\n")
+    o.write(f"fail_ext={fail_ext}\n")
+
+print(f"[INFO] Rescue PAF records seen: {seen}", file=sys.stderr)
+print(f"[INFO] Rescue candidates passing thresholds: {pass_count}", file=sys.stderr)
+print(f"[INFO] Rescue accepted backbone replacements: {len(accepted_pairs)}", file=sys.stderr)
+print(f"[INFO] Rescue rejected: missing ids={fail_not_in}, zero/invalid={fail_zero}, not_terminal={fail_not_terminal}, low_ident={fail_ident}, low_aln_bp={fail_aln_bp}, low_ext={fail_ext}", file=sys.stderr)
 PY
-          check_command
+    check_command
 
-          if [[ -s assemblies/backbone.telomere_rescued.next.fa ]]; then
-            mv -f assemblies/backbone.telomere_rescued.next.fa assemblies/backbone.telomere_rescued.fa
-          fi
-        else
-          echo "[warn] minimap2 not found; skipping telomere rescue." >&2
-        fi
-      else
-        echo "[INFO] No single-end telomeric contigs available for telomere rescue"
-        cp -f assemblies/backbone.filtered.nodup.fa assemblies/backbone.telomere_rescued.fa
-      fi
+    if [[ -s assemblies/backbone.telomere_rescued.next.fa ]]; then
+      mv -f assemblies/backbone.telomere_rescued.next.fa assemblies/backbone.telomere_rescued.fa
+    fi
 
-      # ------------------------------------------------------------
-      # 12F. Remove rescued contigs redundant to protected set
-      # ------------------------------------------------------------
-      if [[ -s assemblies/protected.telomere.fa && -s assemblies/backbone.telomere_rescued.fa ]] && command -v minimap2 >/dev/null 2>&1; then
-        dedup_paf="assemblies/rescued_vs_protected.paf"
-        minimap2 -x asm20 -t "${threads:-8}" assemblies/protected.telomere.fa assemblies/backbone.telomere_rescued.fa > "$dedup_paf"
-        check_command
+    echo "[INFO] Rescue donor source: ${single_tel_src:-none}"
+    if [[ -s assemblies/single_tel.replaced.ids ]]; then
+      echo "[INFO] Accepted telomere rescue replacements: $(wc -l < assemblies/single_tel.replaced.ids)"
+      echo "[INFO] Replacement pairs (backbone -> donor):"
+      cat assemblies/single_tel.replaced.ids
+    else
+      echo "[INFO] Accepted telomere rescue replacements: 0"
+    fi
+    echo "[INFO] Backbone contigs after rescue: $(grep -c '^>' assemblies/backbone.telomere_rescued.fa 2>/dev/null || echo 0)"
+  else
+    echo "[INFO] No single-end telomeric donors available for rescue"
+  fi
 
-        python3 - "$dedup_paf" assemblies/backbone.telomere_rescued.fa > assemblies/backbone.telomere_rescued.keep.ids <<'PY'
+  cp -f assemblies/backbone.telomere_rescued.fa assemblies/backbone.telomere_rescued.dedup.fa
+  if [[ -s assemblies/protected.telomere.fa && -s assemblies/backbone.telomere_rescued.fa ]] && command -v minimap2 >/dev/null 2>&1; then
+    if [[ "$protected_mode" == "strict_t2t" || "$protected_mode" == "telomere_supported_best" || "$protected_mode" == "telomere_supported_best_raw" ]]; then
+      dedup_paf="assemblies/rescued_vs_protected.paf"
+      minimap2 -x asm20 -t "${threads:-8}" assemblies/protected.telomere.fa assemblies/backbone.telomere_rescued.fa > "$dedup_paf"
+      check_command
+
+      python3 - "$dedup_paf" assemblies/backbone.telomere_rescued.fa > assemblies/backbone.telomere_rescued.keep.ids <<'PY'
 import sys
-
-cov_thr = 0.95
-id_thr = 0.95
+cov_thr = 0.98
+id_thr = 0.98
 best = {}
-
 with open(sys.argv[1]) as f:
     for ln in f:
         if not ln.strip() or ln.startswith("#"):
@@ -2121,25 +2245,21 @@ with open(sys.argv[1]) as f:
         p = ln.rstrip().split("\t")
         if len(p) < 12:
             continue
-
         qname = p[0]
-        qlen = int(p[1])
-        qs = int(p[2])
-        qe = int(p[3])
+        qlen  = int(p[1])
+        qs    = int(p[2])
+        qe    = int(p[3])
         matches = int(p[9])
-        alnlen = int(p[10])
-
+        alnlen  = int(p[10])
         if qlen <= 0 or alnlen <= 0:
             continue
-
         ident = matches / max(1, alnlen)
-        cov = (qe - qs) / max(1, qlen)
-
+        cov_q = (qe - qs) / max(1, qlen)
         cur = best.get(qname, (0.0, 0.0))
-        if cov > cur[0] or (abs(cov-cur[0]) < 1e-12 and ident > cur[1]):
-            best[qname] = (cov, ident)
+        if cov_q > cur[0] or (abs(cov_q-cur[0]) < 1e-12 and ident > cur[1]):
+            best[qname] = (cov_q, ident)
 
-drop = {q for q, (cov, ident) in best.items() if cov >= cov_thr and ident >= id_thr}
+drop = {q for q, (cov_q, ident) in best.items() if cov_q >= cov_thr and ident >= id_thr}
 
 keep = []
 with open(sys.argv[2]) as f:
@@ -2154,27 +2274,20 @@ with open(sys.argv[2]) as f:
 
 print("\n".join(keep))
 PY
-        check_command
+      check_command
 
-        python3 - assemblies/backbone.telomere_rescued.keep.ids assemblies/backbone.telomere_rescued.fa assemblies/backbone.telomere_rescued.dedup.fa <<'PY'
+      python3 - assemblies/backbone.telomere_rescued.keep.ids assemblies/backbone.telomere_rescued.fa assemblies/backbone.telomere_rescued.dedup.fa <<'PY'
 import sys
-
-ids_file, inp, outp = sys.argv[1:4]
-
-with open(ids_file) as f:
-    ids = {ln.strip() for ln in f if ln.strip()}
-
-with open(inp) as f, open(outp, "w") as o:
+ids = {ln.strip() for ln in open(sys.argv[1]) if ln.strip()}
+with open(sys.argv[2]) as f, open(sys.argv[3], "w") as o:
     name = None
     seq = []
-
     def flush():
         if name is not None and name in ids:
             o.write(f">{name}\n")
             s = "".join(seq)
             for i in range(0, len(s), 60):
                 o.write(s[i:i+60] + "\n")
-
     for ln in f:
         if ln.startswith(">"):
             flush()
@@ -2184,35 +2297,46 @@ with open(inp) as f, open(outp, "w") as o:
             seq.append(ln.strip())
     flush()
 PY
-        check_command
-      else
-        cp -f assemblies/backbone.telomere_rescued.fa assemblies/backbone.telomere_rescued.dedup.fa
-      fi
-
-      # ------------------------------------------------------------
-      # 12G. Final combine
-      # ------------------------------------------------------------
-      if [[ -s assemblies/protected.telomere.fa && -s assemblies/backbone.telomere_rescued.dedup.fa ]]; then
-        cat assemblies/protected.telomere.fa assemblies/backbone.telomere_rescued.dedup.fa > assemblies/final_merge.raw.fasta
-      elif [[ -s assemblies/protected.telomere.fa ]]; then
-        cp -f assemblies/protected.telomere.fa assemblies/final_merge.raw.fasta
-      elif [[ -s assemblies/backbone.telomere_rescued.dedup.fa ]]; then
-        cp -f assemblies/backbone.telomere_rescued.dedup.fa assemblies/final_merge.raw.fasta
-      else
-        cp -f "$asm_fa" assemblies/final_merge.raw.fasta
-      fi
-
-      echo "[ok] Built assemblies/final_merge.raw.fasta (mode: $protected_mode)"
-
-      require_cmd funannotate
-      log_version "funannotate" "funannotate" 2>/dev/null || true
-      funannotate sort -i assemblies/final_merge.raw.fasta -b contig -o "merged_${assembler}_sort.fa" --minlen 500
       check_command
+    fi
+  fi
 
-      [[ -d assemblies ]] || { echo "[error] 'assemblies' folder not found (expected to exist)." >&2; exit 1; }
-      cp -f "merged_${assembler}_sort.fa" "assemblies/final.merged.fasta"
-      echo "[ok] Wrote assemblies/final.merged.fasta"
-      ;;
+  if [[ "$protected_mode" == "strict_t2t" || "$protected_mode" == "telomere_supported_best" || "$protected_mode" == "telomere_supported_best_raw" ]]; then
+    if [[ -s assemblies/protected.telomere.fa && -s assemblies/backbone.telomere_rescued.dedup.fa ]]; then
+      cat assemblies/protected.telomere.fa assemblies/backbone.telomere_rescued.dedup.fa > assemblies/final_merge.raw.fasta
+    elif [[ -s assemblies/protected.telomere.fa ]]; then
+      cp -f assemblies/protected.telomere.fa assemblies/final_merge.raw.fasta
+    elif [[ -s assemblies/backbone.telomere_rescued.dedup.fa ]]; then
+      cp -f assemblies/backbone.telomere_rescued.dedup.fa assemblies/final_merge.raw.fasta
+    else
+      cp -f "$asm_fa" assemblies/final_merge.raw.fasta
+    fi
+  else
+    if [[ -s assemblies/backbone.telomere_rescued.dedup.fa ]]; then
+      cp -f assemblies/backbone.telomere_rescued.dedup.fa assemblies/final_merge.raw.fasta
+    else
+      cp -f "$asm_fa" assemblies/final_merge.raw.fasta
+    fi
+  fi
+
+  orig_n=$(grep -c '^>' "$asm_fa" 2>/dev/null || echo 0)
+  final_n=$(grep -c '^>' assemblies/final_merge.raw.fasta 2>/dev/null || echo 0)
+  if [[ "$final_n" -lt 5 && "$orig_n" -gt 10 ]]; then
+    echo "[error] Final merge collapsed unexpectedly (${final_n} contigs from backbone ${orig_n}); refusing to continue." >&2
+    exit 1
+  fi
+
+  echo "[ok] Built assemblies/final_merge.raw.fasta (mode: $protected_mode)"
+
+  require_cmd funannotate
+  log_version "funannotate" "funannotate" 2>/dev/null || true
+  funannotate sort -i assemblies/final_merge.raw.fasta -b contig -o "merged_${assembler}_sort.fa" --minlen 500
+  check_command
+
+  [[ -d assemblies ]] || { echo "[error] 'assemblies' folder not found (expected to exist)." >&2; exit 1; }
+  cp -f "merged_${assembler}_sort.fa" "assemblies/final.merged.fasta"
+  echo "[ok] Wrote assemblies/final.merged.fasta"
+  ;;
     13)
       echo "Step 13 - BUSCO analysis"
 
@@ -2374,15 +2498,18 @@ PY
       rm -f "$pyfile"
       echo "[ok] Wrote assemblies/merged.busco.csv (lineage: ${lineage})"
       ;;
+
     14)
       echo "Step 14 - Telomere analysis (final assembly)"
 
       [[ -d assemblies ]] || { echo "[error] 'assemblies' folder not found."; exit 1; }
+
       final_fa="assemblies/final.merged.fasta"
       if [[ ! -s "$final_fa" ]]; then
         echo "[error] Final merged FASTA '$final_fa' not found." >&2
         exit 1
       fi
+
       if ! command -v seqtk >/dev/null 2>&1; then
         echo "[error] seqtk not found in the active conda environment." >&2
         exit 127
@@ -2394,73 +2521,100 @@ PY
       csv="assemblies/merged.telo.csv"
       tel_window="${TEL_WINDOW:-100}"
 
+      rm -f "$list" "$ids" "$out" "$csv"
+
       seqtk telo -s 1 -m "${motif:-TTAGGG}" "$final_fa" > "$list"
       check_command
 
       awk -v w="$tel_window" '
-        NF>=4 { gsub(/
-/, "") }
-        NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-          c=$1; sub(/[ 	].*$/, "", c)
-          left=$2; right=$3; len=$4
+        {
+          gsub(/\r/, "", $0)
+        }
+        NF >= 4 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
+          c = $1
+          sub(/[ \t].*$/, "", c)
+          left = $2 + 0
+          right = $3 + 0
+          len = $4 + 0
           if (left <= w || (len - right) <= w) print c
         }
       ' "$list" | sort -u > "$ids"
 
       if [[ -s "$ids" ]]; then
         seqtk subseq "$final_fa" "$ids" > "$out"
-        [[ -s "$out" ]] && echo "[ok] Wrote $(basename "$out")" || echo "[warn] ${out} is empty"
+        if [[ -s "$out" ]]; then
+          echo "[ok] Wrote $(basename "$out")"
+        else
+          echo "[warn] ${out} is empty"
+        fi
       else
         echo "[warn] No telomere-containing contigs for final assembly; writing empty ${out}"
         : > "$out"
       fi
 
-      double=$(awk -v w="$tel_window" '
-        NF>=4 { gsub(/
-/, "") }
-        NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-          c=$1; sub(/[ 	].*$/, "", c)
-          left=$2; right=$3; len=$4
-          has_left=(left <= w); has_right=((len - right) <= w)
-          if (has_left && has_right) print c
-        }
-      ' "$list" | sort -u | wc -l)
+      double="$(
+        awk -v w="$tel_window" '
+          {
+            gsub(/\r/, "", $0)
+          }
+          NF >= 4 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
+            c = $1
+            sub(/[ \t].*$/, "", c)
+            left = $2 + 0
+            right = $3 + 0
+            len = $4 + 0
+            has_left = (left <= w)
+            has_right = ((len - right) <= w)
+            if (has_left && has_right) print c
+          }
+        ' "$list" | sort -u | wc -l | awk '{print $1}'
+      )"
 
-      single=$(awk -v w="$tel_window" '
-        NF>=4 { gsub(/
-/, "") }
-        NF>=4 && $2~/^[0-9]+$/ && $3~/^[0-9]+$/ && $4~/^[0-9]+$/ {
-          c=$1; sub(/[ 	].*$/, "", c)
-          left=$2; right=$3; len=$4
-          has_left=(left <= w); has_right=((len - right) <= w)
-          if ((has_left + has_right) == 1) print c
-        }
-      ' "$list" | sort -u | wc -l)
+      single="$(
+        awk -v w="$tel_window" '
+          {
+            gsub(/\r/, "", $0)
+          }
+          NF >= 4 && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ {
+            c = $1
+            sub(/[ \t].*$/, "", c)
+            left = $2 + 0
+            right = $3 + 0
+            len = $4 + 0
+            has_left = (left <= w)
+            has_right = ((len - right) <= w)
+            if ((has_left + has_right) == 1) print c
+          }
+        ' "$list" | sort -u | wc -l | awk '{print $1}'
+      )"
 
-      total_supported=$(( ${double:-0} + ${single:-0} ))
+      double="${double:-0}"
+      single="${single:-0}"
+      total_supported=$(( double + single ))
 
       protected_mode="none"
-      [[ -s protected_telomere_mode.txt ]] && protected_mode="$(cat protected_telomere_mode.txt)"
+      [[ -s assemblies/protected_telomere_mode.txt ]] && protected_mode="$(cat assemblies/protected_telomere_mode.txt)"
 
       strict_pool_n=$(grep -c '^>' t2t_clean.fasta 2>/dev/null || echo 0)
-      single_best_pool_n=$(grep -c '^>' single_tel_best_clean.fasta 2>/dev/null || echo 0)
-      tel_pool_n=$(grep -c '^>' telomere_supported_best_clean.fasta 2>/dev/null || echo 0)
+      single_best_pool_n=$(grep -c '^>' single_tel_best.fasta 2>/dev/null || echo 0)
+      tel_pool_n=$(grep -c '^>' telomere_supported_best.fasta 2>/dev/null || echo 0)
 
       rescue_n=0
       if [[ -s assemblies/single_tel.replaced.ids ]]; then
-        rescue_n=$(wc -l < assemblies/single_tel.replaced.ids 2>/dev/null || echo 0)
+        rescue_n="$(wc -l < assemblies/single_tel.replaced.ids 2>/dev/null || echo 0)"
+        rescue_n="${rescue_n:-0}"
       fi
 
       {
         echo "Metric,merged"
-        echo "Telomere double-end contigs,${double:-0}"
-        echo "Telomere single-end contigs,${single:-0}"
-        echo "Telomere-supported contigs,${total_supported:-0}"
+        echo "Telomere double-end contigs,${double}"
+        echo "Telomere single-end contigs,${single}"
+        echo "Telomere-supported contigs,${total_supported}"
         echo "Protected telomere mode,${protected_mode}"
         echo "Step10 strict T2T pool contigs,${strict_pool_n:-0}"
         echo "Step10 best single-end telomere pool contigs,${single_best_pool_n:-0}"
         echo "Step10 optimized telomere-supported pool contigs,${tel_pool_n:-0}"
-        echo "Step12 rescued telomere replacements,${rescue_n:-0}"
+        echo "Step12 rescued telomere replacements,${rescue_n}"
       } > "$csv"
 
       echo "[ok] Wrote $(basename "$csv")"
@@ -2487,8 +2641,7 @@ PY
       python3 - <<'PY'
 import os, csv, sys
 
-out_dir_csv = os.path.join("assemblies")
-if not os.path.isdir(out_dir_csv):
+if not os.path.isdir("assemblies"):
     sys.stderr.write("[error] 'assemblies' folder not found.\n")
     sys.exit(1)
 
@@ -2506,14 +2659,11 @@ def write_csv(rows, path):
     with open(path, "w", newline="") as f:
         csv.writer(f).writerows(rows)
 
-def from_report_to_csv(report_path):
-    with open(report_path, newline="") as f:
-        rows = list(csv.reader(f, delimiter="\t"))
-    if not rows or len(rows[0]) < 2:
-        sys.stderr.write("[error] report.tsv appears malformed.\n"); sys.exit(1)
-    out = [["Metric","merged"]]
-    for r in rows[1:]:
-        if not r: continue
+def from_report_to_csv(report_rows):
+    out = [["Metric", "merged"]]
+    for r in report_rows[1:]:
+        if not r:
+            continue
         metric = r[0]
         val = r[1] if len(r) > 1 else ""
         out.append([metric, val])
@@ -2523,22 +2673,26 @@ def from_treport_to_outputs(treport_path):
     with open(treport_path, newline="") as f:
         rows = list(csv.reader(f, delimiter="\t"))
     if not rows or len(rows[0]) < 2:
-        sys.stderr.write("[error] transposed_report.tsv appears malformed.\n"); sys.exit(1)
-    header  = rows[0]
+        sys.stderr.write("[error] transposed_report.tsv appears malformed.\n")
+        sys.exit(1)
+
+    header = rows[0]
     metrics = header[1:]
 
     row_idx = None
     for i in range(1, len(rows)):
         if rows[i] and rows[i][0].strip().lower() == "final":
-            row_idx = i; break
+            row_idx = i
+            break
     if row_idx is None:
         row_idx = 1 if len(rows) > 1 else None
     if row_idx is None:
-        sys.stderr.write("[error] No assembly rows in transposed_report.tsv.\n"); sys.exit(1)
+        sys.stderr.write("[error] No assembly rows in transposed_report.tsv.\n")
+        sys.exit(1)
 
     vals_row = rows[row_idx]
-    rep_rows = [["Assembly","final"]]
-    csv_rows = [["Metric","merged"]]
+    rep_rows = [["Assembly", "final"]]
+    csv_rows = [["Metric", "merged"]]
     for j, m in enumerate(metrics, start=1):
         v = vals_row[j] if j < len(vals_row) else ""
         rep_rows.append([m, v])
@@ -2548,11 +2702,12 @@ def from_treport_to_outputs(treport_path):
 if os.path.exists(report):
     with open(report, newline="") as f:
         rep_rows = list(csv.reader(f, delimiter="\t"))
-    if rep_rows:
-        rep_rows[0][0] = "Assembly"
+    if not rep_rows or len(rep_rows[0]) < 2:
+        sys.stderr.write("[error] report.tsv appears malformed.\n")
+        sys.exit(1)
+    rep_rows[0][0] = "Assembly"
     write_tsv(rep_rows, final_report_tsv)
-    csv_rows = from_report_to_csv(final_report_tsv)
-    write_csv(csv_rows, final_csv)
+    write_csv(from_report_to_csv(rep_rows), final_csv)
 elif os.path.exists(treport):
     rep_rows, csv_rows = from_treport_to_outputs(treport)
     write_tsv(rep_rows, final_report_tsv)
@@ -2564,6 +2719,8 @@ else:
 print(f"Wrote {final_report_tsv}")
 print(f"Wrote {final_csv}")
 PY
+      check_command
+
       echo "[ok] Wrote assemblies/merged-quast.tsv and assemblies/merged.quast.csv"
       ;;
     16)
@@ -2597,7 +2754,7 @@ PY
         echo "[INFO] Merqury disabled for final assembly comparison"
       fi
 
-      mkdir -p final_results
+      mkdir -p final_results assemblies
 
       python3 - <<'PY'
 import os, csv, re
@@ -2638,13 +2795,13 @@ PY
 import os, csv
 from collections import OrderedDict
 
-TEL_WINDOW = int(os.getenv("TEL_WINDOW", "100"))
 FINAL_FILES = [
     ("telo", "assemblies/merged.telo.csv"),
     ("busco", "assemblies/merged.busco.csv"),
     ("quast", "assemblies/merged.quast.csv"),
     ("merqury", "assemblies/merged.merqury.csv"),
 ]
+
 ASM_INFO = "assemblies/assembly_info.csv"
 DECISION_FILE = "assemblies/selection_decision.txt"
 OUT = "final_results/final_result.csv"
@@ -2658,14 +2815,16 @@ def read_metric_merged(path):
         hdr = next(r, None)
         if not hdr or len(hdr) < 2:
             return rows
+
         idx_metric = 0
         idx_merged = 1
         for i, h in enumerate(hdr):
             name = (h or "").strip().lower()
             if name == "metric":
                 idx_metric = i
-            if name == "merged":
+            elif name == "merged":
                 idx_merged = i
+
         for row in r:
             if not row:
                 continue
@@ -2688,56 +2847,18 @@ def read_assembly_info(path):
         body = [row for row in r if row]
     return hdr, body
 
-def compute_telo_counts(list_path, tel_window=100):
-    try:
-        s = {}
-        e = {}
-        with open(list_path, "r", newline="") as f:
-            for line in f:
-                line = line.strip().replace('\r', '')
-                if not line:
-                    continue
-                parts = line.split()
-                if len(parts) < 4:
-                    continue
-                c = parts[0]
-                try:
-                    a = int(parts[1])
-                    b = int(parts[2])
-                    L = int(parts[3])
-                except ValueError:
-                    continue
-                has_left = (a <= tel_window)
-                has_right = ((L - b) <= tel_window)
-                s[c] = 1 if has_left else 0
-                e[c] = 1 if has_right else 0
-
-        keys = set(s) | set(e)
-        double = sum(1 for k in keys if s.get(k, 0) > 0 and e.get(k, 0) > 0)
-        single = sum(1 for k in keys if (s.get(k, 0) + e.get(k, 0)) == 1)
-        total = double + single
-        return str(double), str(single), str(total)
-    except Exception:
-        return None
-
 def count_fasta(path):
     try:
         with open(path) as f:
             return str(sum(1 for ln in f if ln.startswith(">")))
     except Exception:
-        return ""
+        return "0"
 
 final_map = OrderedDict()
+
 for _, p in FINAL_FILES:
     for m, v in read_metric_merged(p):
         final_map[m] = v
-
-_tcounts = compute_telo_counts("assemblies/final.telo.list", TEL_WINDOW)
-if _tcounts is not None:
-    _d, _s, _t = _tcounts
-    final_map["Telomere double-end contigs"] = _d
-    final_map["Telomere single-end contigs"] = _s
-    final_map["Telomere-supported contigs"] = _t
 
 if os.path.exists(DECISION_FILE):
     with open(DECISION_FILE) as f:
@@ -2756,32 +2877,32 @@ if os.path.exists(DECISION_FILE):
             elif k == "score_formula":
                 final_map["Score formula"] = v
 
-if os.path.exists("protected_telomere_mode.txt"):
-    with open("protected_telomere_mode.txt") as f:
+if os.path.exists("assemblies/protected_telomere_mode.txt"):
+    with open("assemblies/protected_telomere_mode.txt") as f:
         final_map["Protected telomere mode"] = f.read().strip()
 
 final_map["Step10 strict T2T pool contigs"] = count_fasta("t2t_clean.fasta")
-final_map["Step10 best single-end telomere pool contigs"] = count_fasta("single_tel_best_clean.fasta")
-final_map["Step10 optimized telomere-supported pool contigs"] = count_fasta("telomere_supported_best_clean.fasta")
+final_map["Step10 best single-end telomere pool contigs"] = count_fasta("single_tel_best.fasta")
+final_map["Step10 optimized telomere-supported pool contigs"] = count_fasta("telomere_supported_best.fasta")
 
 try:
     with open("assemblies/single_tel.replaced.ids") as f:
         final_map["Step12 rescued telomere replacements"] = str(sum(1 for _ in f))
 except Exception:
-    final_map["Step12 rescued telomere replacements"] = ""
+    final_map["Step12 rescued telomere replacements"] = "0"
 
 hdr, body = read_assembly_info(ASM_INFO)
 
 if hdr is not None:
     hdr_out = list(hdr)
-    if "merged" not in [h.lower() for h in hdr]:
+    if "merged" not in [h.lower() for h in hdr_out]:
         hdr_out.append("merged")
 
     out_rows = []
     for row in body:
         base_row = row[:]
         while len(base_row) < len(hdr_out) - 1:
-            base_row.append("")
+          base_row.append("")
         metric = (base_row[0] if base_row else "").strip()
         out_rows.append(base_row + [final_map.get(metric, "")])
 
